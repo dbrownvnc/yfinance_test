@@ -207,18 +207,26 @@ def _fetch_history(ticker, period): return yf.Ticker(ticker).history(period=peri
 def _fetch_info(ticker): return yf.Ticker(ticker).info
 
 def get_stock_name(ticker):
-    # 포트폴리오에 이름이 있으면 그거 사용, 없으면 yf 사용
+    """
+    [핵심 수정] 기업명 가져오기 로직 강화
+    1. 포트폴리오 메모리 확인
+    2. yfinance 정보 확인 (Timeout 적용)
+    """
+    # 1. 포트폴리오 우선 검색
     if 'portfolio_df' in st.session_state:
         df = st.session_state['portfolio_df']
         row = df[df['ticker'] == ticker]
         if not row.empty:
             return row.iloc[0]['name']
             
+    # 2. yfinance 검색 (Timeout 보호)
     try:
         info = run_with_timeout(_fetch_info, args=(ticker,), timeout=5)
-        if info: return info.get('shortName') or info.get('longName') or ticker
+        if info: 
+            return info.get('shortName') or info.get('longName') or ticker
         return ticker
-    except: return ticker
+    except: 
+        return ticker
 
 def clean_html_text(text):
     if not text: return ""
@@ -256,14 +264,14 @@ def fetch_rss_realtime(url, limit=10):
         return []
 
 def get_realtime_news(ticker, name):
+    """
+    [핵심 수정] 티커가 아닌 '공식 기업명(name)'으로 뉴스 검색
+    """
     add_log(f"📰 [NEWS] 뉴스 검색 시작: {ticker} ({name})")
     news_items = []
     is_kr = bool(re.search(r'\.KS|\.KQ|[0-9]{6}', ticker))
     
-    # ---------------------------------------------------------
-    # 1. Yahoo Finance RSS / yfinance (보조 수단)
-    # ---------------------------------------------------------
-    # 티커 기반 검색 유지 (보조 데이터)
+    # 1. Yahoo Finance (보조 - 티커 기반)
     if not is_kr:
         try:
             rss_url = f"https://finance.yahoo.com/rss/headline?s={ticker}"
@@ -291,13 +299,10 @@ def get_realtime_news(ticker, name):
             except Exception as e:
                 add_log(f"   ⚠️ yfinance Fail: {e}")
 
-    # ---------------------------------------------------------
-    # 2. Google News (메인 로직 변경) - 기업명(Name) 기반 검색
-    # ---------------------------------------------------------
-    # 티커 대신 공식 기업명(name)을 사용하여 검색 정확도 향상 및 필터링 해제
-    
-    clean_name = name.replace('"', '').replace("'", "") # 특수문자 제거
-    search_query = f'"{clean_name}"' # 정확한 매칭을 위해 따옴표 포함
+    # 2. Google News (메인 - 기업명 기반)
+    # 이름 정제 및 검색어 생성
+    clean_name = name.replace('"', '').replace("'", "")
+    search_query = f'"{clean_name}"' # 정확도 향상을 위해 따옴표 유지
     
     add_log(f"   Trying Google News RSS with query: {search_query} (Name-based)")
     
@@ -309,13 +314,12 @@ def get_realtime_news(ticker, name):
         for n in google_news: 
             n['source'] = "Google News"
         
-        # 기존 뉴스 리스트에 구글 뉴스(기업명 검색 결과) 병합
+        # 기존 뉴스 리스트에 병합
         news_items.extend(google_news)
         
     except Exception as e:
         add_log(f"   ❌ Google News Search Error: {e}")
 
-    # 최신순 정렬 혹은 상위 N개 반환
     return news_items[:10]
 
 def get_financial_metrics(ticker):
@@ -393,34 +397,21 @@ def handle_search_click(mode, is_prompt):
 
 def step_fetch_data(ticker, mode):
     add_log(f"==========================================")
+    
+    # [핵심 수정] 대문자 강제 변환 (ms -> MS)
+    ticker = ticker.upper() 
     add_log(f"📦 [STEP 1] 데이터 수집 시작: {ticker} ({mode})")
     
-    stock_name = ticker 
+    # [핵심 수정] 안전한 기업명 가져오기 (Helper 함수 사용)
+    stock_name = get_stock_name(ticker)
+    add_log(f"   -> 식별된 기업명: {stock_name}")
+
     clean_code = re.sub(r'[^0-9]', '', ticker)
     is_kr = (".KS" in ticker or ".KQ" in ticker or (ticker.isdigit() and len(ticker)==6))
     tv_symbol = f"KRX:{clean_code}" if is_kr else ticker
 
     try:
-        stock = yf.Ticker(ticker)
-        # Session State에서 이름 가져오기 시도
-        try:
-            if 'portfolio_df' in st.session_state:
-                p_df = st.session_state['portfolio_df']
-                row = p_df[p_df['ticker'] == ticker]
-                if not row.empty:
-                    stock_name = row.iloc[0]['name']
-                    add_log(f"   - 이름(포트폴리오): {stock_name}")
-                else:
-                    info = stock.info
-                    fetched_name = info.get('shortName') or info.get('longName')
-                    if fetched_name: stock_name = fetched_name
-                    add_log(f"   - 이름(yfinance): {stock_name}")
-            else:
-                info = stock.info
-                fetched_name = info.get('shortName') or info.get('longName')
-                if fetched_name: stock_name = fetched_name
-        except: pass
-            
+        # 주가 데이터 수집
         period = st.session_state.get('selected_period_str', '1y')
         add_log(f"   - 주가 데이터 요청 (기간: {period})")
         df = run_with_timeout(_fetch_history, args=(ticker, period), timeout=10)
@@ -448,6 +439,7 @@ def step_fetch_data(ticker, mode):
             
             if st.session_state.get('use_news', True):
                 try:
+                    # [확인] 위에서 구한 stock_name(기업명)을 그대로 전달
                     news = get_realtime_news(ticker, stock_name)
                     if news: 
                         formatted_news = []
