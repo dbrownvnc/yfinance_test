@@ -32,7 +32,7 @@ if 'sidebar_state' not in st.session_state:
 
 st.set_page_config(
     layout="wide", 
-    page_title="AI Hyper-Analyst V87", 
+    page_title="AI Hyper-Analyst V88", 
     page_icon="📈",
     initial_sidebar_state=st.session_state['sidebar_state']
 )
@@ -120,7 +120,7 @@ def save_state_to_csv():
             add_log(f"❌ [SAVE] 파일 저장 실패: {str(e)}")
 
 def add_ticker_logic():
-    """티커 추가 로직 (Callback)"""
+    """티커 추가 로직 (Callback) - 이름 조회 로직 개선됨"""
     raw_input = st.session_state.get('new_ticker_input', '')
     if raw_input:
         add_log(f"➕ [ADD] 티커 추가 요청 감지: '{raw_input}'")
@@ -133,6 +133,7 @@ def add_ticker_logic():
             if ticker and ticker not in existing_tickers:
                 try: 
                     add_log(f"🔍 [ADD] {ticker} 정보 조회 중 (yfinance)...")
+                    # [이름 조회 로직 개선]
                     t_info = yf.Ticker(ticker).info
                     name = t_info.get('shortName') or t_info.get('longName') or ticker
                     add_log(f"   -> 이름 식별 성공: {name}")
@@ -200,23 +201,34 @@ def run_with_timeout(func, args=(), timeout=10):
 def _fetch_history(ticker, period): return yf.Ticker(ticker).history(period=period)
 def _fetch_info(ticker): return yf.Ticker(ticker).info
 
-# 메타데이터 수집 강화
+# [수정됨] 메타데이터 수집 강화 (이름 가져오는 로직 개선)
 def get_extended_metadata(ticker):
-    name = ticker
+    """
+    티커의 이름, 섹터, 산업 정보를 최대한 긁어옵니다.
+    1. 포트폴리오 내장 정보 우선 확인
+    2. yfinance info에서 shortName -> longName 순으로 확인
+    """
+    name = ticker # 기본값
     sector = "Unknown"
     industry = "Unknown"
     
+    # 1. 포트폴리오(사용자가 저장한 이름) 확인
     if 'portfolio_df' in st.session_state:
         df = st.session_state['portfolio_df']
         row = df[df['ticker'] == ticker]
         if not row.empty:
             name = row.iloc[0]['name']
 
+    # 2. yfinance를 통해 최신 정보 확인
     try:
         t = yf.Ticker(ticker)
         info = run_with_timeout(lambda: t.info, timeout=4)
         if info:
-            name = info.get('shortName') or info.get('longName') or name
+            # [핵심] shortName -> longName -> 기존 name(또는 ticker) 순서로 적용
+            fetched_name = info.get('shortName') or info.get('longName')
+            if fetched_name:
+                name = fetched_name
+            
             sector = info.get('sector', 'Unknown')
             industry = info.get('industry', 'Unknown')
     except Exception as e:
@@ -397,6 +409,7 @@ def step_fetch_data(ticker, mode):
     is_kr = (".KS" in ticker or ".KQ" in ticker or (ticker.isdigit() and len(ticker)==6))
     tv_symbol = f"KRX:{clean_code}" if is_kr else ticker
 
+    # [중요] 개선된 메타데이터 함수 사용
     name, sector, industry = get_extended_metadata(ticker)
     
     meta_info_instruction = ""
@@ -444,12 +457,11 @@ def step_fetch_data(ticker, mode):
                 except Exception as e: 
                     news_text = f"뉴스 가져오기 실패: {str(e)}"
 
-        # [핵심 수정] 선택된 분석 항목을 단순 나열이 아닌 '강제 목차 리스트'로 변환
+        # 선택된 분석 항목을 '강제 목차 리스트'로 변환
         selected_focus_list = []
         for opt in opt_targets:
             if st.session_state.get(f"focus_{opt}", True): selected_focus_list.append(opt)
         
-        # 리스트를 불렛 포인트 문자열로 변환
         formatted_focus_list = "\n".join([f"- {item}" for item in selected_focus_list])
         
         focus_instruction = f"""
@@ -725,7 +737,7 @@ with st.sidebar.expander("📜 시스템 실행 로그 (System Logs)", expanded=
         st.session_state['log_buffer'] = []
         st.rerun()
 
-st.title(f"📈 AI Hyper-Analyst V87")
+st.title(f"📈 AI Hyper-Analyst V88")
 
 if st.session_state['is_analyzing']:
     targets = st.session_state['targets_to_run']
