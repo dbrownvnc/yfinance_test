@@ -368,11 +368,15 @@ def handle_search_click(mode, is_prompt):
         start_analysis_process(targets, mode, is_prompt)
     else: st.warning("티커를 입력해주세요.")
 
+# ---------------------------------------------------------
+# [수정됨] Step 1: 데이터 수집 및 프롬프트 생성 (섹터 분석 추가)
+# ---------------------------------------------------------
 def step_fetch_data(ticker, mode):
     add_log(f"==========================================")
     add_log(f"📦 [STEP 1] 데이터 수집 시작: {ticker} ({mode})")
     
     stock_name = ticker 
+    stock_sector = "미분류 (N/A)"
     clean_code = re.sub(r'[^0-9]', '', ticker)
     is_kr = (".KS" in ticker or ".KQ" in ticker or (ticker.isdigit() and len(ticker)==6))
     tv_symbol = f"KRX:{clean_code}" if is_kr else ticker
@@ -380,6 +384,13 @@ def step_fetch_data(ticker, mode):
     try:
         stock = yf.Ticker(ticker)
         try:
+            # 섹터 정보 및 이름 추출 시도
+            info = stock.info
+            fetched_sector = info.get('sector')
+            if fetched_sector:
+                stock_sector = fetched_sector
+            add_log(f"   - 식별된 섹터: {stock_sector}")
+
             if 'portfolio_df' in st.session_state:
                 p_df = st.session_state['portfolio_df']
                 row = p_df[p_df['ticker'] == ticker]
@@ -387,15 +398,14 @@ def step_fetch_data(ticker, mode):
                     stock_name = row.iloc[0]['name']
                     add_log(f"   - 이름(포트폴리오): {stock_name}")
                 else:
-                    info = stock.info
                     fetched_name = info.get('shortName') or info.get('longName')
                     if fetched_name: stock_name = fetched_name
                     add_log(f"   - 이름(yfinance): {stock_name}")
             else:
-                info = stock.info
                 fetched_name = info.get('shortName') or info.get('longName')
                 if fetched_name: stock_name = fetched_name
-        except: pass
+        except Exception as e:
+             add_log(f"   ⚠️ 기본 정보(이름/섹터) 조회 실패: {e}")
             
         period = st.session_state.get('selected_period_str', '1y')
         add_log(f"   - 주가 데이터 요청 (기간: {period})")
@@ -494,12 +504,12 @@ def step_fetch_data(ticker, mode):
         if mode == "10K":
             prompt = f"""
             [역할] 월가 수석 애널리스트 (펀더멘털 & 장기 투자 전문가)
-            [대상] {ticker} (공식 기업명: {stock_name})
+            [대상] {ticker} (공식 기업명: {stock_name}, 섹터: {stock_sector})
             [자료] 최신 SEC 10-K 보고서 (Annual Report)
             
             [지시사항]
             당신은 월가 최고의 주식 애널리스트입니다.
-            위 종목의 **최신 SEC 10-K 보고서**를 기반으로 기업의 기초 체력과 장기 비전을 심층 분석해 주세요.
+            위 종목(섹터: {stock_sector})의 **최신 SEC 10-K 보고서**를 기반으로 기업의 기초 체력과 장기 비전을 심층 분석해 주세요.
             **주의: '{ticker}'는 '{stock_name}'입니다. 다른 기업(예: Microsoft 등)과 혼동하지 마십시오.**
             필요하다면 Google Search 도구를 활용하여 최신 데이터를 교차 검증하세요.
             
@@ -509,6 +519,7 @@ def step_fetch_data(ticker, mode):
 
             **[필수 분석 항목]**
             1. **비즈니스 개요 (Overview)**: 
+               - **소속 섹터({stock_sector}) 내에서의 위치** 및 경쟁력.
                - 산업 내 위치, 비즈니스 모델의 강점, Fiscal Year End 날짜.
             
             2. **MD&A 및 미래 전망 (Outlook)**: (중요)
@@ -533,11 +544,11 @@ def step_fetch_data(ticker, mode):
         elif mode == "10Q":
             prompt = f"""
             [역할] 실적 모멘텀 및 트렌드 분석가
-            [대상] {ticker} (공식 기업명: {stock_name})
+            [대상] {ticker} (공식 기업명: {stock_name}, 섹터: {stock_sector})
             [자료] 최신 SEC 10-Q 보고서 (Quarterly Report)
             
             [지시사항]
-            위 종목의 **최신 SEC 10-Q 보고서**를 기반으로 **직전 분기 대비 변화(Trend)**에 집중하여 분석 보고서를 작성하세요.
+            위 종목(섹터: {stock_sector})의 **최신 SEC 10-Q 보고서**를 기반으로 **직전 분기 대비 변화(Trend)**에 집중하여 분석 보고서를 작성하세요.
             **주의: '{ticker}'는 '{stock_name}'입니다.**
             단기적인 실적 흐름과 경영진의 가이던스 변화를 포착하는 것이 핵심입니다.
             
@@ -568,11 +579,11 @@ def step_fetch_data(ticker, mode):
         elif mode == "8K":
             prompt = f"""
             [역할] 속보 뉴스 데스크 / 이벤트 드리븐 트레이더
-            [대상] {ticker} (공식 기업명: {stock_name})
+            [대상] {ticker} (공식 기업명: {stock_name}, 섹터: {stock_sector})
             [자료] 최신 SEC 8-K 보고서 (Current Report)
             
             [지시사항]
-            위 종목의 **최신 SEC 8-K 보고서**를 분석하여, 발생한 **특정 사건(Event)**의 내용과 주가에 미칠 영향을 즉각적으로 분석하세요.
+            위 종목(섹터: {stock_sector})의 **최신 SEC 8-K 보고서**를 분석하여, 발생한 **특정 사건(Event)**의 내용과 주가에 미칠 영향을 즉각적으로 분석하세요.
             **주의: '{ticker}'는 '{stock_name}'입니다.**
             가장 최근에 공시된 중요한 사건 하나에 집중하십시오.
             
@@ -590,7 +601,7 @@ def step_fetch_data(ticker, mode):
                - 재무적으로 즉각적인 영향이 있는가?
             
             3. **호재/악재 판별 (Impact Analysis)**:
-               - 이 뉴스가 주가에 단기적으로 긍정적인지(Bullish) 부정적인지(Bearish) 명확한 판단.
+               - 이 뉴스가 해당 섹터({stock_sector}) 및 주가에 단기적으로 긍정적인지(Bullish) 부정적인지(Bearish) 명확한 판단.
                - 시장의 예상 범위를 벗어난 서프라이즈 요소가 있는지.
             
             [결론]
@@ -600,7 +611,7 @@ def step_fetch_data(ticker, mode):
         else:
             prompt = f"""
             [역할] 월스트리트 수석 애널리스트
-            [대상] {ticker} (공식 기업명: {stock_name})
+            [대상] {ticker} (공식 기업명: {stock_name}, 섹터: {stock_sector})
             [모드] {mode}
             [중점 분석] {focus}
             [투자 관점] {viewpoint}
@@ -621,7 +632,8 @@ def step_fetch_data(ticker, mode):
             
             [지시사항]
             위 데이터를 바탕으로 전문적이고 종합적인 투자 보고서를 작성하십시오.
-            **뉴스 분석 시, 제목뿐만 아니라 제공된 '내용요약'을 참고하여 구체적인 원인과 영향을 파악하십시오.**
+            **분석 시작 시, 이 기업이 속한 섹터('{stock_sector}')의 최근 업황 분위기를 간략히 언급하며 시작하십시오.**
+            뉴스 분석 시, 제목뿐만 아니라 제공된 '내용요약'을 참고하여 구체적인 원인과 영향을 파악하십시오.
             보고서는 가독성 있게 마크다운 형식으로 작성하고, 불필요한 서론 없이 본론부터 명확히 서술하십시오.
             
             결론 부분에는 반드시 [매수 / 매도 / 관망] 중 하나의 명확한 투자 의견을 제시하십시오.
@@ -927,4 +939,3 @@ if not st.session_state['is_analyzing'] and st.session_state['analysis_results']
 
 elif not st.session_state['is_analyzing']:
     st.info("👈 왼쪽 사이드바에서 종목을 선택하고 분석 버튼을 눌러주세요.")
-
