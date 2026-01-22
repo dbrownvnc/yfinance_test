@@ -249,24 +249,109 @@ def fetch_rss_realtime(url, limit=10):
         return []
 
 def get_realtime_news(ticker, name):
+    """
+    뉴스 검색 - 정식 기업명 기반으로 검색하여 혼동 방지
+    예: MS 티커 → "Morgan Stanley" 뉴스 검색 (Microsoft 아님)
+    """
     add_log(f"📰 [NEWS] 뉴스 검색 시작: {ticker} ({name})")
     news_items = []
     is_kr = bool(re.search(r'\.KS|\.KQ|[0-9]{6}', ticker))
     
+    # 뉴스 관련성 필터링 함수
+    def is_relevant_news(news_title, news_summary, company_name, ticker_symbol):
+        """뉴스가 해당 기업과 관련 있는지 확인"""
+        title_lower = news_title.lower() if news_title else ""
+        summary_lower = news_summary.lower() if news_summary else ""
+        combined_text = f"{title_lower} {summary_lower}"
+        
+        # 기업명에서 핵심 키워드 추출 (Inc., Corp., Ltd. 등 제거)
+        name_clean = company_name.lower()
+        for suffix in [' inc.', ' inc', ' corp.', ' corp', ' ltd.', ' ltd', ' llc', ' co.', ' co', 
+                       ' corporation', ' incorporated', ' limited', ' group', ' holdings']:
+            name_clean = name_clean.replace(suffix, '')
+        name_clean = name_clean.strip()
+        
+        # 기업명의 첫 단어 또는 핵심 단어 추출
+        name_words = [w for w in name_clean.split() if len(w) > 2]
+        
+        # 관련성 체크
+        # 1. 정확한 기업명 포함
+        if name_clean in combined_text:
+            return True
+        
+        # 2. 기업명의 핵심 단어들이 포함되어 있는지
+        if name_words:
+            # 첫 번째 핵심 단어가 포함되면 관련 있음
+            if name_words[0] in combined_text:
+                return True
+            # 2개 이상의 단어가 포함되면 관련 있음
+            match_count = sum(1 for word in name_words if word in combined_text)
+            if match_count >= 2:
+                return True
+        
+        # 3. 티커 심볼이 대문자로 명확히 포함 (예: "MS reported", "AAPL stock")
+        ticker_clean = ticker_symbol.replace('.KS', '').replace('.KQ', '').upper()
+        # 티커가 단독으로 등장하는지 확인 (단어 경계)
+        ticker_pattern = rf'\b{re.escape(ticker_clean)}\b'
+        if re.search(ticker_pattern, news_title or ""):
+            return True
+            
+        return False
+    
+    # 혼동되기 쉬운 티커 목록 (특별 처리)
+    confusing_tickers = {
+        'MS': 'Morgan Stanley',  # Microsoft와 혼동
+        'GM': 'General Motors',  # 다른 GM과 혼동
+        'F': 'Ford Motor',       # 단일 문자 티커
+        'T': 'AT&T',             # 단일 문자 티커
+        'C': 'Citigroup',        # 단일 문자 티커
+        'V': 'Visa',             # 단일 문자 티커
+        'K': 'Kellanova',        # 단일 문자 티커
+        'X': 'United States Steel', # 단일 문자 티커
+    }
+    
+    # 혼동 방지를 위한 제외 키워드
+    exclude_keywords = {
+        'MS': ['microsoft', 'windows', 'azure', 'xbox', 'office 365', 'satya nadella'],
+        'GM': [],
+        'F': [],
+    }
+    
+    def should_exclude(news_title, news_summary, ticker_symbol):
+        """혼동될 수 있는 뉴스 제외"""
+        if ticker_symbol.upper() not in exclude_keywords:
+            return False
+        
+        combined = f"{news_title} {news_summary}".lower()
+        for keyword in exclude_keywords.get(ticker_symbol.upper(), []):
+            if keyword in combined:
+                add_log(f"      ❌ 제외됨 (혼동 키워드 '{keyword}' 발견): {news_title[:50]}...")
+                return True
+        return False
+    
+    # 1. Yahoo Finance RSS (티커 기반 - 가장 정확)
     if not is_kr:
         try:
             add_log(f"   Trying Yahoo Finance RSS for {ticker}...")
             rss_url = f"https://finance.yahoo.com/rss/headline?s={ticker}"
-            yahoo_rss_items = fetch_rss_realtime(rss_url, limit=7)
+            yahoo_rss_items = fetch_rss_realtime(rss_url, limit=10)
             if yahoo_rss_items:
                 add_log(f"   -> Yahoo RSS에서 {len(yahoo_rss_items)}건 발견")
+                filtered_items = []
                 for item in yahoo_rss_items:
+                    # 혼동 키워드 체크
+                    if should_exclude(item['title'], item.get('summary', ''), ticker):
+                        continue
                     item['source'] = "Yahoo Finance"
-                    news_items.append(item)
-                return news_items
+                    filtered_items.append(item)
+                
+                if filtered_items:
+                    add_log(f"   -> 필터링 후 {len(filtered_items)}건")
+                    return filtered_items[:7]
         except Exception as e:
             add_log(f"   ⚠️ Yahoo RSS Fail: {e}")
 
+    # 2. yfinance 라이브러리 (티커 기반)
     if not is_kr and not news_items:
         try:
             add_log(f"   Trying yfinance library for {ticker}...")
@@ -274,27 +359,86 @@ def get_realtime_news(ticker, name):
             yf_news = yf_obj.news
             if yf_news:
                 add_log(f"   -> yfinance에서 {len(yf_news)}건 발견")
+                filtered_items = []
                 for item in yf_news:
-                    title = item.get('title'); link = item.get('link')
+                    title = item.get('title')
+                    link = item.get('link')
                     summary = item.get('summary', '') 
-                    if not title or not link: continue
+                    if not title or not link: 
+                        continue
+                    
+                    # 혼동 키워드 체크
+                    if should_exclude(title, summary, ticker):
+                        continue
+                        
                     pub_time = item.get('providerPublishTime', 0)
-                    try: date_str = datetime.datetime.fromtimestamp(pub_time).strftime("%m-%d %H:%M")
-                    except: date_str = "최신"
-                    news_items.append({'title': title, 'link': link, 'date_str': date_str, 'source': "Yahoo Finance", 'summary': summary})
-                if news_items: return news_items[:7]
+                    try: 
+                        date_str = datetime.datetime.fromtimestamp(pub_time).strftime("%m-%d %H:%M")
+                    except: 
+                        date_str = "최신"
+                    filtered_items.append({
+                        'title': title, 'link': link, 'date_str': date_str, 
+                        'source': "Yahoo Finance", 'summary': summary
+                    })
+                
+                if filtered_items:
+                    add_log(f"   -> 필터링 후 {len(filtered_items)}건")
+                    return filtered_items[:7]
         except Exception as e:
             add_log(f"   ⚠️ yfinance Fail: {e}")
 
-    if is_kr: search_query = f'"{name}"'
-    else: search_query = f'{ticker} stock'
+    # 3. Google News RSS (정식 기업명으로 검색 - 핵심 수정!)
+    # 티커가 아닌 정식 기업명으로 검색하여 혼동 방지
+    if is_kr:
+        search_query = f'"{name}"'
+    else:
+        # 정식 기업명 사용 (예: "Morgan Stanley" 검색, "MS stock" 아님)
+        # 기업명이 티커와 같거나 너무 짧으면 티커+stock 사용
+        if name and name != ticker and len(name) > 3:
+            # 정식 기업명에서 불필요한 접미사 제거
+            search_name = name
+            for suffix in [' Inc.', ' Inc', ' Corp.', ' Corp', ' Ltd.', ' Ltd', ' LLC', 
+                          ' Co.', ' Co', ' Corporation', ' Incorporated', ' Limited']:
+                search_name = search_name.replace(suffix, '')
+            search_query = f'"{search_name.strip()}" stock'
+            add_log(f"   📌 정식 기업명으로 검색: '{search_query}' (티커 혼동 방지)")
+        else:
+            search_query = f'{ticker} stock'
+            add_log(f"   ⚠️ 기업명 불분명, 티커로 검색: '{search_query}'")
     
     add_log(f"   Trying Google News RSS with query: {search_query}")
     q_encoded = urllib.parse.quote(search_query)
     url = f"https://news.google.com/rss/search?q={q_encoded}&hl=ko&gl=KR&ceid=KR:ko"
-    google_news = fetch_rss_realtime(url, limit=7)
-    for n in google_news: n['source'] = "Google News"
-    return google_news
+    google_news = fetch_rss_realtime(url, limit=10)
+    
+    # Google News 결과 필터링
+    if google_news:
+        filtered_news = []
+        for n in google_news:
+            n['source'] = "Google News"
+            
+            # 혼동 키워드 체크
+            if should_exclude(n['title'], n.get('summary', ''), ticker):
+                continue
+            
+            # 관련성 체크 (정식 기업명 또는 티커가 포함되어야 함)
+            if is_relevant_news(n['title'], n.get('summary', ''), name, ticker):
+                filtered_news.append(n)
+            else:
+                add_log(f"      ⚠️ 관련성 낮음 (스킵): {n['title'][:50]}...")
+        
+        add_log(f"   -> Google News 필터링: {len(google_news)}건 → {len(filtered_news)}건")
+        
+        if filtered_news:
+            return filtered_news[:7]
+        elif google_news:
+            # 필터링 결과가 없으면 원본 중 일부라도 반환 (뉴스가 완전히 사라지지 않도록)
+            add_log(f"   ⚠️ 필터링 결과 없음, 상위 3건 반환")
+            for n in google_news[:3]:
+                n['source'] = "Google News"
+            return google_news[:3]
+    
+    return news_items
 
 def get_company_info(ticker):
     """기업 기본 정보 (이름, 섹터, 산업) 조회"""
