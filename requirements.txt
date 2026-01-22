@@ -1,0 +1,7 @@
+streamlit
+yfinance
+google-generativeai
+pandas
+plotly
+requests
+python-dateutil
