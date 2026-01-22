@@ -32,7 +32,7 @@ if 'sidebar_state' not in st.session_state:
 
 st.set_page_config(
     layout="wide", 
-    page_title="AI Hyper-Analyst V84", 
+    page_title="AI Hyper-Analyst V85", 
     page_icon="📈",
     initial_sidebar_state=st.session_state['sidebar_state']
 )
@@ -50,7 +50,7 @@ def add_log(message):
     if len(st.session_state['log_buffer']) > 500:
         st.session_state['log_buffer'].pop(0)
 
-# [변수 정의] 최상단 배치 - 수정됨 (항목 추가)
+# [변수 정의] 최상단 배치
 opt_targets = [
     "현금건전성 지표 (FCF, 유동비율, 부채비율)", 
     "핵심 재무제표 분석 (손익, 대차대조, 현금흐름)",
@@ -60,7 +60,7 @@ opt_targets = [
     "외국인/기관 수급 분석", 
     "경쟁사 비교 및 업황", 
     "단기/중기 매매 전략",
-    "투자성향별 포트폴리오 적정보유비중"  # 👈 [추가됨]
+    "투자성향별 포트폴리오 적정보유비중"
 ]
 
 # 상태 변수 초기화
@@ -94,7 +94,6 @@ def load_data_to_state():
                     st.session_state['portfolio_df'] = pd.DataFrame(columns=['ticker', 'name'])
                     add_log("ℹ️ [INIT] 파일은 존재하나 데이터가 비어있음.")
                 else:
-                    # 인덱스 리셋하여 로드
                     st.session_state['portfolio_df'] = df.reset_index(drop=True)
                     add_log(f"✅ [INIT] 데이터 로드 완료: {len(df)}개 항목 로드됨.")
             except Exception as e:
@@ -108,7 +107,6 @@ def save_state_to_csv():
     """현재 Session State의 데이터를 CSV로 저장하고 인덱스 재정렬"""
     if 'portfolio_df' in st.session_state:
         df = st.session_state['portfolio_df']
-        # [핵심] 저장 전 인덱스 초기화 (0, 1, 2...)
         df = df.reset_index(drop=True)
         st.session_state['portfolio_df'] = df 
         
@@ -156,7 +154,6 @@ def add_ticker_logic():
             
     st.session_state['new_ticker_input'] = ""
 
-# 앱 시작 시 데이터 로드
 load_data_to_state()
 
 # ---------------------------------------------------------
@@ -166,7 +163,6 @@ if 'del_ticker' in st.query_params:
     del_ticker = st.query_params['del_ticker']
     add_log(f"🗑️ [DELETE] 삭제 요청 수신: {del_ticker}")
     
-    # 1. State에서 삭제
     if 'portfolio_df' in st.session_state:
         df = st.session_state['portfolio_df']
         prev_len = len(df)
@@ -175,14 +171,11 @@ if 'del_ticker' in st.query_params:
         st.session_state['portfolio_df'] = df
         add_log(f"   -> 메모리 삭제 완료 ({prev_len} -> {new_len})")
         
-        # 2. 파일 저장
         save_state_to_csv()
         
-        # 3. 체크박스 상태 제거
         if f"chk_{del_ticker}" in st.session_state:
             del st.session_state[f"chk_{del_ticker}"]
             
-    # 4. URL 파라미터 초기화 및 강제 새로고침
     st.query_params.clear()
     add_log("🔄 [DELETE] 변경 사항 반영을 위해 Rerun 수행.")
     st.rerun()
@@ -208,13 +201,11 @@ def _fetch_history(ticker, period): return yf.Ticker(ticker).history(period=peri
 def _fetch_info(ticker): return yf.Ticker(ticker).info
 
 def get_stock_name(ticker):
-    # 포트폴리오에 이름이 있으면 그거 사용, 없으면 yf 사용
     if 'portfolio_df' in st.session_state:
         df = st.session_state['portfolio_df']
         row = df[df['ticker'] == ticker]
         if not row.empty:
             return row.iloc[0]['name']
-            
     try:
         info = run_with_timeout(_fetch_info, args=(ticker,), timeout=5)
         if info: return info.get('shortName') or info.get('longName') or ticker
@@ -388,7 +379,6 @@ def step_fetch_data(ticker, mode):
 
     try:
         stock = yf.Ticker(ticker)
-        # Session State에서 이름 가져오기 시도
         try:
             if 'portfolio_df' in st.session_state:
                 p_df = st.session_state['portfolio_df']
@@ -463,17 +453,44 @@ def step_fetch_data(ticker, mode):
         if "5." in analysis_depth:
             level_instruction = "가장 낙관적인/비관적인 시나리오와 구체적인 미래 주가 예측(Target Price Range)을 포함하여 심층적으로 분석하십시오."
         
-        # [수정] 투자성향별 비중 제안 프롬프트 추가 로직
+        # [NEW] 투자성향별 비중 제안
         if "투자성향별 포트폴리오 적정보유비중" in focus:
             level_instruction += """
-            \n[투자성향별 비중 제안]
+            \n[특별 지시: 투자성향별 비중 제안]
             사용자가 '투자성향별 포트폴리오 적정보유비중'을 요청했습니다. 보고서 결론 부분에 반드시 다음 3가지 투자 성향으로 나누어 전체 자산 대비 권장 보유 비중(%)과 논리를 각각 서술하십시오:
             1. 🦁 공격적 투자자 (Aggressive): 높은 변동성 감내, 고수익 추구형.
             2. ⚖️ 중립적 투자자 (Moderate): 성장과 안정의 균형 중시형.
             3. 🛡️ 보수적 투자자 (Conservative): 원금 보존 및 리스크 최소화형.
             """
 
+        # [NEW] 성장주/가치주 구분 및 맞춤 분석 로직
+        growth_value_logic = """
+        [핵심 지시사항: 성장주 vs 가치주 판단 및 맞춤 분석]
+        1. 먼저 이 기업이 **'성장주(Growth Stock)'** 성향이 강한지 **'가치주(Value Stock)'** 성향이 강한지, 혹은 하이브리드인지 명확히 규정하고 그 이유를 설명하십시오.
+        
+        2. 판단된 성향에 따라 아래의 해당 항목들을 **가장 우선적으로 상세히** 분석하십시오.
+        
+        **(A) 성장주(Growth Stock)로 판단 시 중점 점검 항목:**
+        * **매출 성장률:** 최근 5년간 지속적인 상승 추세인지 여부 (CAGR 등).
+        * **Cash Flow:** 현금 흐름이 실제로 증가하고 있는지 (회계적 이익보다 현금 창출력).
+        * **ROI (Return on Investment):** 투자 대비 수익률이 개선되고 있는지 여부.
+        * **Profit Margin 추이:** 마이너스에서 플러스로 전환되는 방향성 및 흑자 지속 가능성.
+        * **지속성(Sustainability):** 실적이 급등락하지 않고 안정적인 우상향을 그리는지 (변동성 리스크 점검).
+        
+        **(B) 가치주(Value Stock)로 판단 시 중점 점검 항목:**
+        * **시장 점유율:** 점유율의 증가 vs 감소 추이 (감소 시 배당 축소 가능성 경고).
+        * **배당금 안정성:** 배당 지급의 꾸준함, 배당 성향, 배당금 증액 여부.
+        * **주가 안정성:** 과거 데이터를 바탕으로 한 주가 변동성(Beta) 및 하방 경직성 파악.
+        * **이익률 변화:** Profit Margin의 추이 (상승은 해자(Moat) 및 경쟁력 강화로 해석).
+        * **EPS 변화:** 주당순이익(EPS)의 장기적인 트렌드 추적.
+        """
+        level_instruction += growth_value_logic
+
         add_log(f"📝 프롬프트 조립 시작 (Mode: {mode})")
+        
+        # 공통으로 사용할 한글 강제 문구
+        korean_enforcement = "\n\n**[중요] 모든 답변은 반드시 자연스러운 '한국어(Korean)'로 작성해야 합니다.** 영어로 답변하지 마십시오."
+
         if mode == "10K":
             prompt = f"""
             [역할] 월가 수석 애널리스트 (펀더멘털 & 장기 투자 전문가)
@@ -511,6 +528,7 @@ def step_fetch_data(ticker, mode):
             
             [결론]
             기업의 장기적인 투자가치와 해자(Moat)에 대한 종합 평가.
+            {korean_enforcement}
             """
         elif mode == "10Q":
             prompt = f"""
@@ -545,6 +563,7 @@ def step_fetch_data(ticker, mode):
             
             [결론]
             이번 분기 실적이 일시적인지 구조적인 추세인지 판단하고, 단기/중기 투자 매력도 제시.
+            {korean_enforcement}
             """
         elif mode == "8K":
             prompt = f"""
@@ -576,6 +595,7 @@ def step_fetch_data(ticker, mode):
             
             [결론]
             이 뉴스에 대해 투자자가 취해야 할 즉각적인 대응 전략 (매수 기회 vs 리스크 관리).
+            {korean_enforcement}
             """
         else:
             prompt = f"""
@@ -586,6 +606,8 @@ def step_fetch_data(ticker, mode):
             [투자 관점] {viewpoint}
             [분석 레벨] {analysis_depth}
             **주의: '{ticker}'는 '{stock_name}'입니다. 다른 기업과 혼동하지 마십시오.**
+            
+            [추가 지시사항]
             {level_instruction}
             
             [데이터 요약]
@@ -603,6 +625,7 @@ def step_fetch_data(ticker, mode):
             보고서는 가독성 있게 마크다운 형식으로 작성하고, 불필요한 서론 없이 본론부터 명확히 서술하십시오.
             
             결론 부분에는 반드시 [매수 / 매도 / 관망] 중 하나의 명확한 투자 의견을 제시하십시오.
+            {korean_enforcement}
             """
         
         st.session_state['temp_data'] = {
@@ -780,7 +803,7 @@ with st.sidebar.expander("📜 시스템 실행 로그 (System Logs)", expanded=
 # ---------------------------------------------------------
 # 6. 실행 컨트롤러 (오토 드라이브)
 # ---------------------------------------------------------
-st.title(f"📈 AI Hyper-Analyst V84")
+st.title(f"📈 AI Hyper-Analyst V85")
 
 if st.session_state['is_analyzing']:
     targets = st.session_state['targets_to_run']
@@ -904,4 +927,3 @@ if not st.session_state['is_analyzing'] and st.session_state['analysis_results']
 
 elif not st.session_state['is_analyzing']:
     st.info("👈 왼쪽 사이드바에서 종목을 선택하고 분석 버튼을 눌러주세요.")
-
