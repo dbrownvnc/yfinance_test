@@ -43,9 +43,10 @@ if 'log_buffer' not in st.session_state:
 
 def add_log(message):
     """시스템 로그를 추가하는 함수 (상세 모드)"""
-    timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    timestamp = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3] # 밀리초까지 표시
     log_entry = f"[{timestamp}] {message}"
     st.session_state['log_buffer'].append(log_entry)
+    # 로그 버퍼 제한 (메모리 보호)
     if len(st.session_state['log_buffer']) > 500:
         st.session_state['log_buffer'].pop(0)
 
@@ -80,9 +81,10 @@ for opt in opt_targets:
 if 'focus_all' not in st.session_state: st.session_state['focus_all'] = True
 
 # ---------------------------------------------------------
-# 2. 데이터 관리 함수
+# 2. 데이터 관리 함수 (Session State Master 방식)
 # ---------------------------------------------------------
 def load_data_to_state():
+    """CSV 파일을 읽어 Session State에 로드 (앱 실행 시 1회 수행)"""
     if 'portfolio_df' not in st.session_state:
         add_log("📥 [INIT] 포트폴리오 데이터 로드 시도...")
         if os.path.exists(CSV_FILE):
@@ -90,33 +92,38 @@ def load_data_to_state():
                 df = pd.read_csv(CSV_FILE)
                 if df.empty:
                     st.session_state['portfolio_df'] = pd.DataFrame(columns=['ticker', 'name'])
+                    add_log("ℹ️ [INIT] 파일은 존재하나 데이터가 비어있음.")
                 else:
                     st.session_state['portfolio_df'] = df.reset_index(drop=True)
-                    add_log(f"✅ [INIT] 데이터 로드 완료: {len(df)}개 항목.")
+                    add_log(f"✅ [INIT] 데이터 로드 완료: {len(df)}개 항목 로드됨.")
             except Exception as e:
                 st.session_state['portfolio_df'] = pd.DataFrame(columns=['ticker', 'name'])
-                add_log(f"❌ [INIT] 데이터 로드 에러: {str(e)}")
+                add_log(f"❌ [INIT] 데이터 로드 중 에러 발생: {str(e)}")
         else:
             st.session_state['portfolio_df'] = pd.DataFrame(columns=['ticker', 'name'])
+            add_log("ℹ️ [INIT] 기존 파일 없음. 새 포트폴리오 데이터프레임 생성.")
 
 def save_state_to_csv():
+    """현재 Session State의 데이터를 CSV로 저장하고 인덱스 재정렬"""
     if 'portfolio_df' in st.session_state:
         df = st.session_state['portfolio_df']
         df = df.reset_index(drop=True)
         st.session_state['portfolio_df'] = df 
+        
         try:
             with open(CSV_FILE, 'w', encoding='utf-8', newline='') as f:
                 df.to_csv(f, index=False)
                 f.flush()
                 os.fsync(f.fileno()) 
-            add_log(f"💾 [SAVE] 파일 저장 완료.")
+            add_log(f"💾 [SAVE] 파일 저장 완료. 총 {len(df)}개 항목 동기화됨.")
         except Exception as e:
             add_log(f"❌ [SAVE] 파일 저장 실패: {str(e)}")
 
 def add_ticker_logic():
+    """티커 추가 로직 (Callback)"""
     raw_input = st.session_state.get('new_ticker_input', '')
     if raw_input:
-        add_log(f"➕ [ADD] 티커 추가 요청: '{raw_input}'")
+        add_log(f"➕ [ADD] 티커 추가 요청 감지: '{raw_input}'")
         tickers = [t.strip().upper() for t in raw_input.split(',')]
         df = st.session_state['portfolio_df']
         existing_tickers = df['ticker'].values
@@ -125,37 +132,53 @@ def add_ticker_logic():
         for ticker in tickers:
             if ticker and ticker not in existing_tickers:
                 try: 
+                    add_log(f"🔍 [ADD] {ticker} 정보 조회 중 (yfinance)...")
                     t_info = yf.Ticker(ticker).info
-                    name = t_info.get('shortName') or t_info.get('longName') or ticker
-                except: 
+                    # 이름 찾기 강화
+                    name = t_info.get('longName') or t_info.get('shortName') or ticker
+                    add_log(f"   -> 이름 식별 성공: {name}")
+                except Exception as e: 
                     name = ticker
+                    add_log(f"   ⚠️ [ADD] {ticker} 정보 조회 실패, 티커명 사용. Error: {e}")
+                
                 new_rows.append({'ticker': ticker, 'name': name})
+                add_log(f"   -> 추가 목록에 등록: {ticker}")
             else:
-                pass
+                add_log(f"   -> 중복 스킵: {ticker}")
         
         if new_rows:
             new_df = pd.DataFrame(new_rows)
             df = pd.concat([df, new_df], ignore_index=True)
             st.session_state['portfolio_df'] = df
             save_state_to_csv()
-            add_log("✅ [ADD] 신규 티커 저장 완료.")
+            add_log("✅ [ADD] 신규 티커 저장 완료 및 UI 갱신.")
+            
     st.session_state['new_ticker_input'] = ""
 
 load_data_to_state()
 
 # ---------------------------------------------------------
-# [최우선 처리] 삭제 요청 핸들링
+# [최우선 처리] 삭제 요청 핸들링 (새로고침 로직)
 # ---------------------------------------------------------
 if 'del_ticker' in st.query_params:
     del_ticker = st.query_params['del_ticker']
+    add_log(f"🗑️ [DELETE] 삭제 요청 수신: {del_ticker}")
+    
     if 'portfolio_df' in st.session_state:
         df = st.session_state['portfolio_df']
+        prev_len = len(df)
         df = df[df['ticker'] != del_ticker]
+        new_len = len(df)
         st.session_state['portfolio_df'] = df
+        add_log(f"   -> 메모리 삭제 완료 ({prev_len} -> {new_len})")
+        
         save_state_to_csv()
+        
         if f"chk_{del_ticker}" in st.session_state:
             del st.session_state[f"chk_{del_ticker}"]
+            
     st.query_params.clear()
+    add_log("🔄 [DELETE] 변경 사항 반영을 위해 Rerun 수행.")
     st.rerun()
 
 # ---------------------------------------------------------
@@ -177,18 +200,6 @@ def run_with_timeout(func, args=(), timeout=10):
 
 def _fetch_history(ticker, period): return yf.Ticker(ticker).history(period=period)
 def _fetch_info(ticker): return yf.Ticker(ticker).info
-
-def get_stock_name(ticker):
-    if 'portfolio_df' in st.session_state:
-        df = st.session_state['portfolio_df']
-        row = df[df['ticker'] == ticker]
-        if not row.empty:
-            return row.iloc[0]['name']
-    try:
-        info = run_with_timeout(_fetch_info, args=(ticker,), timeout=5)
-        if info: return info.get('shortName') or info.get('longName') or ticker
-        return ticker
-    except: return ticker
 
 def clean_html_text(text):
     if not text: return ""
@@ -219,6 +230,7 @@ def fetch_rss_realtime(url, limit=10):
             try: dt = parser.parse(pubDate); date_str = dt.strftime("%m-%d %H:%M")
             except: date_str = "최신"
             items.append({'title': title, 'link': link, 'date_str': date_str, 'summary': description})
+        add_log(f"   ✅ [RSS] Parsed {len(items)} items.")
         return items
     except Exception as e:
         add_log(f"   ❌ [RSS] Error: {e}")
@@ -231,20 +243,25 @@ def get_realtime_news(ticker, name):
     
     if not is_kr:
         try:
+            add_log(f"   Trying Yahoo Finance RSS for {ticker}...")
             rss_url = f"https://finance.yahoo.com/rss/headline?s={ticker}"
             yahoo_rss_items = fetch_rss_realtime(rss_url, limit=7)
             if yahoo_rss_items:
+                add_log(f"   -> Yahoo RSS에서 {len(yahoo_rss_items)}건 발견")
                 for item in yahoo_rss_items:
                     item['source'] = "Yahoo Finance"
                     news_items.append(item)
                 return news_items
-        except: pass
+        except Exception as e:
+            add_log(f"   ⚠️ Yahoo RSS Fail: {e}")
 
     if not is_kr and not news_items:
         try:
+            add_log(f"   Trying yfinance library for {ticker}...")
             yf_obj = yf.Ticker(ticker)
             yf_news = yf_obj.news
             if yf_news:
+                add_log(f"   -> yfinance에서 {len(yf_news)}건 발견")
                 for item in yf_news:
                     title = item.get('title'); link = item.get('link')
                     summary = item.get('summary', '') 
@@ -254,25 +271,30 @@ def get_realtime_news(ticker, name):
                     except: date_str = "최신"
                     news_items.append({'title': title, 'link': link, 'date_str': date_str, 'source': "Yahoo Finance", 'summary': summary})
                 if news_items: return news_items[:7]
-        except: pass
+        except Exception as e:
+            add_log(f"   ⚠️ yfinance Fail: {e}")
 
     if is_kr: search_query = f'"{name}"'
     else: search_query = f'{ticker} stock'
     
+    add_log(f"   Trying Google News RSS with query: {search_query}")
     q_encoded = urllib.parse.quote(search_query)
     url = f"https://news.google.com/rss/search?q={q_encoded}&hl=ko&gl=KR&ceid=KR:ko"
     google_news = fetch_rss_realtime(url, limit=7)
     for n in google_news: n['source'] = "Google News"
     return google_news
 
-def get_financial_metrics(ticker, info=None):
+def get_financial_metrics(ticker, info_data=None):
     add_log(f"📊 [FIN] 재무 지표 조회: {ticker}")
-    # info가 전달되지 않았으면 새로 조회
-    if not info:
-        info = run_with_timeout(_fetch_info, args=(ticker,), timeout=5)
     
+    # info_data가 이미 있으면 재사용, 없으면 fetch
+    if info_data:
+        info = info_data
+    else:
+        info = run_with_timeout(_fetch_info, args=(ticker,), timeout=5)
+
     if not info: 
-        add_log("   ❌ [FIN] 정보 가져오기 실패")
+        add_log("   ❌ [FIN] 정보 가져오기 실패 (Timeout/Empty)")
         return {}
     try:
         def get_fmt(key): val = info.get(key); return f"{val:,.2f}" if isinstance(val, (int, float)) else "N/A"
@@ -282,6 +304,7 @@ def get_financial_metrics(ticker, info=None):
             "Return on Equity (ROE)": get_fmt('returnOnEquity'), "Total Revenue": get_fmt('totalRevenue'),
             "Net Income": get_fmt('netIncome')
         }
+        add_log(f"   ✅ [FIN] 재무 지표 확보 완료: {metrics}")
         return metrics
     except Exception as e: 
         add_log(f"   ⚠️ [FIN] 데이터 파싱 에러: {e}")
@@ -318,9 +341,11 @@ def generate_with_fallback(prompt, api_key, start_model):
     for model_name in fallback_chain:
         try:
             start_time = time.time()
+            add_log(f"   Attempting: {model_name}...")
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(prompt)
             duration = time.time() - start_time
+            
             add_log(f"   ✅ [AI] 성공! ({model_name}, {duration:.2f}s)")
             return response.text, model_name 
         except Exception as e:
@@ -344,58 +369,61 @@ def step_fetch_data(ticker, mode):
     
     # 기본값 초기화
     stock_name = ticker 
+    sector = "Unknown"
+    industry = "Unknown"
+    
     clean_code = re.sub(r'[^0-9]', '', ticker)
     is_kr = (".KS" in ticker or ".KQ" in ticker or (ticker.isdigit() and len(ticker)==6))
     tv_symbol = f"KRX:{clean_code}" if is_kr else ticker
-    sector = "Unknown"
-    industry = "Unknown"
 
     try:
-        # [수정] yfinance 정보 조회 (이름 및 섹터/산업 정보를 여기서 한 번에 가져옴)
-        stock_info = run_with_timeout(_fetch_info, args=(ticker,), timeout=6)
+        stock = yf.Ticker(ticker)
         
-        if stock_info:
-            # 1. 이름 추출 (yfinance 우선)
-            fetched_name = stock_info.get('shortName') or stock_info.get('longName')
-            if fetched_name:
-                stock_name = fetched_name
-                add_log(f"   - 이름(yfinance): {stock_name}")
-            else:
-                # 포트폴리오 백업 이름 확인
-                if 'portfolio_df' in st.session_state:
-                    p_df = st.session_state['portfolio_df']
-                    row = p_df[p_df['ticker'] == ticker]
-                    if not row.empty:
-                        stock_name = row.iloc[0]['name']
-                        add_log(f"   - 이름(포트폴리오): {stock_name}")
-            
-            # 2. 섹터 및 산업 추출 [NEW]
-            sector = stock_info.get('sector', 'N/A')
-            industry = stock_info.get('industry', 'N/A')
-            add_log(f"   - 섹터: {sector} / 산업: {industry}")
+        # [SOL-1] 정보 추출 강화 (Multi-Source Extraction)
+        # yfinance info를 한 번만 호출해서 변수에 저장
+        info_data = run_with_timeout(_fetch_info, args=(ticker,), timeout=8) # 타임아웃 8초로 약간 증가
+        
+        if info_data:
+            # 1. 이름 찾기 (longName 우선 -> shortName -> ticker)
+            stock_name = info_data.get('longName') or info_data.get('shortName') or stock_name
+            # 2. 섹터/산업 찾기
+            sector = info_data.get('sector', 'Unknown')
+            industry = info_data.get('industry', 'Unknown')
+            add_log(f"   -> Info Fetch 성공: {stock_name} / {sector} / {industry}")
         else:
-             add_log("   ⚠️ 기본 정보(Info) 조회 실패, 티커명 사용")
+            # Info 실패 시 포트폴리오 데이터 확인
+            add_log(f"   ⚠️ Info Fetch 실패 (Timeout/None). 포트폴리오 데이터 확인.")
+            if 'portfolio_df' in st.session_state:
+                p_df = st.session_state['portfolio_df']
+                row = p_df[p_df['ticker'] == ticker]
+                if not row.empty:
+                    stock_name = row.iloc[0]['name']
+                    add_log(f"   -> 포트폴리오 이름 사용: {stock_name}")
 
-        # 주가 데이터
         period = st.session_state.get('selected_period_str', '1y')
+        add_log(f"   - 주가 데이터 요청 (기간: {period})")
         df = run_with_timeout(_fetch_history, args=(ticker, period), timeout=10)
         
-        if df is None: df = pd.DataFrame()
-        
+        if df is None: 
+            df = pd.DataFrame()
+            add_log("   ⚠️ 주가 데이터 타임아웃/실패")
+        else:
+            add_log(f"   ✅ 주가 데이터 수신: {len(df)} rows")
+
         data_summary = "No Data"
         if not df.empty:
             curr = df['Close'].iloc[-1]; high_val = df['High'].max(); low_val = df['Low'].min()
             stats_str = f"High: {high_val:.2f}, Low: {low_val:.2f}, Current: {curr:.2f}"
             display_df = df.tail(60); recent_days = df.tail(5)
             data_summary = f"[Stats] {stats_str}\n[Trend]\n{display_df.to_string()}\n[Recent]\n{recent_days.to_string()}"
+        else: curr = 0
 
         fin_str = "N/A"; news_text = "N/A"
         
         if mode not in ["10K", "10Q", "8K"]:
-            # 이미 가져온 stock_info 재활용
             try: 
-                fm = get_financial_metrics(ticker, info=stock_info)
-                fin_str = str(fm) if fm else "N/A"
+                # 위에서 가져온 info_data 재사용
+                fm = get_financial_metrics(ticker, info_data); fin_str = str(fm) if fm else "N/A"
             except: pass
             
             if st.session_state.get('use_news', True):
@@ -412,9 +440,11 @@ def step_fetch_data(ticker, mode):
                             if summary: item_str += f"\n  > 내용요약: {summary}"
                             formatted_news.append(item_str)
                         news_text = "\n".join(formatted_news)
+                        add_log(f"   ✅ 뉴스 텍스트 생성 완료 ({len(news)}건)")
                     else: news_text = "관련된 최신 뉴스가 없습니다."
                 except Exception as e: 
-                    news_text = f"뉴스 에러: {str(e)}"
+                    news_text = f"뉴스 가져오기 실패: {str(e)}"
+                    add_log(f"   ❌ 뉴스 처리 중 치명적 오류: {e}")
 
         selected_focus_list = []
         for opt in opt_targets:
@@ -424,71 +454,100 @@ def step_fetch_data(ticker, mode):
         analysis_depth = st.session_state.get('analysis_depth', "2. 표준 브리핑 (Standard)")
         
         level_instruction = ""
-        # [수정] 시나리오 분석 지시사항 강화 (확률 및 이유 필수)
         if "5." in analysis_depth:
-            level_instruction = """
-            [시나리오 분석 필수 지침]
-            가장 낙관적인(Bull), 기본(Base), 비관적인(Bear) 시나리오 3가지를 반드시 작성하십시오.
-            **중요: 각 시나리오마다 '발생 확률(%)'을 반드시 명시하고, 왜 그 확률을 부여했는지 논리적 이유를 상세히 설명하십시오.**
-            (예: Bull Case: 20% - AI 수요 폭발 지속 시... / Bear Case: 30% - 경기 침체 현실화 시...)
-            또한 구체적인 미래 주가 예측(Target Price Range)을 포함하십시오.
-            """
+            level_instruction = "가장 낙관적인/비관적인 시나리오와 구체적인 미래 주가 예측(Target Price Range)을 포함하여 심층적으로 분석하십시오."
         
         if "투자성향별 포트폴리오 적정보유비중" in focus:
             level_instruction += """
             \n[특별 지시: 투자성향별 비중 제안]
             사용자가 '투자성향별 포트폴리오 적정보유비중'을 요청했습니다. 보고서 결론 부분에 반드시 다음 3가지 투자 성향으로 나누어 전체 자산 대비 권장 보유 비중(%)과 논리를 각각 서술하십시오:
-            1. 🦁 공격적 투자자 (Aggressive)
-            2. ⚖️ 중립적 투자자 (Moderate)
-            3. 🛡️ 보수적 투자자 (Conservative)
+            1. 🦁 공격적 투자자 (Aggressive): 높은 변동성 감내, 고수익 추구형.
+            2. ⚖️ 중립적 투자자 (Moderate): 성장과 안정의 균형 중시형.
+            3. 🛡️ 보수적 투자자 (Conservative): 원금 보존 및 리스크 최소화형.
             """
 
         growth_value_logic = """
         [핵심 지시사항: 성장주 vs 가치주 판단 및 맞춤 분석]
-        1. 이 기업이 '성장주'인지 '가치주'인지 규정하고 이유를 설명하십시오.
-        2. 성향에 따라 아래 항목을 우선 분석하십시오.
-        (A) 성장주: 매출 성장률, Cash Flow, ROI, Profit Margin 흑자전환/유지, 실적 지속성.
-        (B) 가치주: 시장 점유율, 배당금 안정성, 주가 안정성, 이익률(Margin) 추이, EPS 트렌드.
+        1. 먼저 이 기업이 **'성장주(Growth Stock)'** 성향이 강한지 **'가치주(Value Stock)'** 성향이 강한지, 혹은 하이브리드인지 명확히 규정하고 그 이유를 설명하십시오.
+        2. 판단된 성향에 따라 아래의 해당 항목들을 **가장 우선적으로 상세히** 분석하십시오.
+        
+        **(A) 성장주(Growth Stock)로 판단 시 중점 점검 항목:**
+        * **매출 성장률:** 최근 5년간 지속적인 상승 추세인지 여부 (CAGR 등).
+        * **Cash Flow:** 현금 흐름이 실제로 증가하고 있는지 (회계적 이익보다 현금 창출력).
+        * **ROI (Return on Investment):** 투자 대비 수익률이 개선되고 있는지 여부.
+        * **Profit Margin 추이:** 마이너스에서 플러스로 전환되는 방향성 및 흑자 지속 가능성.
+        * **지속성(Sustainability):** 실적이 급등락하지 않고 안정적인 우상향을 그리는지 (변동성 리스크 점검).
+        
+        **(B) 가치주(Value Stock)로 판단 시 중점 점검 항목:**
+        * **시장 점유율:** 점유율의 증가 vs 감소 추이 (감소 시 배당 축소 가능성 경고).
+        * **배당금 안정성:** 배당 지급의 꾸준함, 배당 성향, 배당금 증액 여부.
+        * **주가 안정성:** 과거 데이터를 바탕으로 한 주가 변동성(Beta) 및 하방 경직성 파악.
+        * **이익률 변화:** Profit Margin의 추이 (상승은 해자(Moat) 및 경쟁력 강화로 해석).
+        * **EPS 변화:** 주당순이익(EPS)의 장기적인 트렌드 추적.
         """
         level_instruction += growth_value_logic
 
-        korean_enforcement = "\n\n**[중요] 모든 답변은 반드시 자연스러운 '한국어(Korean)'로 작성해야 합니다.**"
+        # [SOL-3] 시나리오 확률 표기 의무화 로직 추가
+        scenario_logic = """
+        \n[특별 지시: 시나리오 분석 시 필수 포함 사항]
+        시나리오(낙관적/비관적/기본 등)를 작성할 때는 반드시 다음 형식을 지켜야 합니다:
+        * **시나리오 명:** (예: 낙관적 시나리오)
+        * **발생 확률(Probability):** (예: 20%) - 반드시 구체적인 퍼센트(%)를 추정하여 명시하십시오.
+        * **확률 추정 근거(Reasoning):** 왜 이 확률을 부여했는지에 대한 논리적 근거를 설명하십시오. (매크로 환경, 기업 내부 모멘텀 등)
+        """
+        level_instruction += scenario_logic
 
         add_log(f"📝 프롬프트 조립 시작 (Mode: {mode})")
         
-        # [수정] 프롬프트 상단에 [기업명]과 [섹터/산업] 정보 명시
-        base_info_block = f"""
-            [대상 티커] {ticker}
-            [공식 기업명] {stock_name}
-            [섹터(Sector)] {sector}
-            [산업(Industry)] {industry}
+        korean_enforcement = "\n\n**[중요] 모든 답변은 반드시 자연스러운 '한국어(Korean)'로 작성해야 합니다.** 영어로 답변하지 마십시오."
+
+        # [SOL-2] 프롬프트 헤더 정보 강화
+        # 섹터/산업이 Unknown이면 AI가 직접 찾아서 채우도록 지시
+        prompt_header = f"""
+        [대상 티커] {ticker}
+        [공식 기업명] {stock_name}
+        [섹터(Sector)] {sector}
+        [산업(Industry)] {industry}
+        
+        **[중요 지시: 기업 정보 보완]**
+        만약 위에 제공된 [공식 기업명], [섹터], [산업] 정보가 'Unknown'이거나 비어있다면, 
+        당신의 지식 베이스(Knowledge Base)를 활용하여 올바른 정보를 스스로 식별한 후 분석을 진행하십시오.
+        분석 보고서 서두에 올바른 기업명과 섹터/산업을 명시해 주십시오.
         """
 
         if mode == "10K":
             prompt = f"""
             [역할] 월가 수석 애널리스트 (펀더멘털 & 장기 투자 전문가)
-            {base_info_block}
+            {prompt_header}
             [자료] 최신 SEC 10-K 보고서 (Annual Report)
             
             [지시사항]
+            당신은 월가 최고의 주식 애널리스트입니다.
             위 종목의 **최신 SEC 10-K 보고서**를 기반으로 기업의 기초 체력과 장기 비전을 심층 분석해 주세요.
-            **주의: '{ticker}'는 '{stock_name}'입니다. 다른 기업과 혼동하지 마십시오.**
+            필요하다면 Google Search 도구를 활용하여 최신 데이터를 교차 검증하세요.
             
             **[출력 형식]**
             - 마크다운(Markdown) 형식을 사용하여 깔끔하게 작성하세요.
+            - 섹션 헤더, 불렛 포인트, 볼드체를 적절히 활용하세요.
 
             **[필수 분석 항목]**
             1. **비즈니스 개요 (Overview)**: 
-               - 산업 내 위치, 비즈니스 모델의 강점.
+               - 산업 내 위치, 비즈니스 모델의 강점, Fiscal Year End 날짜.
+            
             2. **MD&A 및 미래 전망 (Outlook)**: (중요)
                - 경영진이 제시하는 내년도 시장 전망 및 전략.
+               - 매출 및 수익성 성장에 대한 경영진의 자신감 톤(Tone) 분석.
+            
             3. **핵심 리스크 및 법적 이슈 (Risk & Legal)**:
                - 사업에 치명적일 수 있는 Risk Factors.
+               - 진행 중인 중요한 소송(Legal Proceedings)이나 규제 이슈 여부.
+            
             4. **재무제표 정밀 분석 (Financials)**:
                - 대차대조표, 손익계산서, 현금흐름표의 주요 변동 사항.
-               - 부채 만기 구조 및 유동성 위기 가능성.
+               - **부채 만기 구조(Debt Maturity)** 및 유동성 위기 가능성 점검.
+            
             5. **주요 이벤트 (Key Events)**:
-               - 자사주 매입, M&A 등.
+               - 자사주 매입, M&A, 경영진 변동, 대규모 구조조정 등.
             
             [결론]
             기업의 장기적인 투자가치와 해자(Moat)에 대한 종합 평가.
@@ -497,56 +556,76 @@ def step_fetch_data(ticker, mode):
         elif mode == "10Q":
             prompt = f"""
             [역할] 실적 모멘텀 및 트렌드 분석가
-            {base_info_block}
+            {prompt_header}
             [자료] 최신 SEC 10-Q 보고서 (Quarterly Report)
             
             [지시사항]
             위 종목의 **최신 SEC 10-Q 보고서**를 기반으로 **직전 분기 대비 변화(Trend)**에 집중하여 분석 보고서를 작성하세요.
+            단기적인 실적 흐름과 경영진의 가이던스 변화를 포착하는 것이 핵심입니다.
+            
+            **[출력 형식]**
+            - 마크다운(Markdown) 형식 사용.
             
             **[필수 분석 항목]**
             1. **실적 요약 (Earnings Summary)**:
                - 매출 및 EPS의 전년 동기(YoY) 및 전 분기(QoQ) 대비 성장률.
+               - 시장 예상치(Consensus) 상회/하회 여부 및 그 원인.
+            
             2. **가이던스 변화 (Guidance Update)**: (매우 중요)
-               - 경영진이 제시한 향후 실적 전망치 변화 및 근거.
+               - 경영진이 제시한 향후 실적 전망치가 상향되었는가, 하향되었는가?
+               - 전망 변경의 구체적인 근거 (수요 증가, 비용 절감 등).
+            
             3. **부문별 성과 (Segment Performance)**:
                - 주요 사업 부문별 매출 및 이익 증감 추이.
+               - 가장 빠르게 성장하는 부문과 둔화되는 부문 식별.
+            
             4. **현금흐름 및 비용 (Cash & Costs)**:
-               - 영업활동 현금흐름, R&D/마케팅 비용 효율성.
+               - 영업활동 현금흐름의 변화.
+               - R&D 및 마케팅 비용 지출 추이 (효율성 분석).
             
             [결론]
-            이번 분기 실적이 일시적인지 구조적인 추세인지 판단.
+            이번 분기 실적이 일시적인지 구조적인 추세인지 판단하고, 단기/중기 투자 매력도 제시.
             {korean_enforcement}
             """
         elif mode == "8K":
             prompt = f"""
             [역할] 속보 뉴스 데스크 / 이벤트 드리븐 트레이더
-            {base_info_block}
+            {prompt_header}
             [자료] 최신 SEC 8-K 보고서 (Current Report)
             
             [지시사항]
             위 종목의 **최신 SEC 8-K 보고서**를 분석하여, 발생한 **특정 사건(Event)**의 내용과 주가에 미칠 영향을 즉각적으로 분석하세요.
+            가장 최근에 공시된 중요한 사건 하나에 집중하십시오.
+            
+            **[출력 형식]**
+            - 마크다운(Markdown) 형식 사용.
+            - 핵심 위주로 간결하고 명확하게 작성.
             
             **[필수 분석 항목]**
             1. **공시 사유 (Triggering Event)**:
-               - 8-K가 제출된 핵심 이유.
+               - 8-K가 제출된 핵심 이유 (Item 번호 및 제목 확인).
+               - 예: 실적 발표, 주요 계약 체결, 경영진 사퇴, M&A, 유상증자 등.
+            
             2. **세부 내용 (Details)**:
-               - 구체적 팩트 정리 및 재무적 영향.
+               - 계약 금액, 거래 조건, 변경된 인물의 프로필 등 구체적 팩트 정리.
+               - 재무적으로 즉각적인 영향이 있는가?
+            
             3. **호재/악재 판별 (Impact Analysis)**:
-               - 주가에 긍정적(Bullish) vs 부정적(Bearish) 판단.
+               - 이 뉴스가 주가에 단기적으로 긍정적인지(Bullish) 부정적인지(Bearish) 명확한 판단.
+               - 시장의 예상 범위를 벗어난 서프라이즈 요소가 있는지.
             
             [결론]
-            투자자가 취해야 할 즉각적인 대응 전략.
+            이 뉴스에 대해 투자자가 취해야 할 즉각적인 대응 전략 (매수 기회 vs 리스크 관리).
             {korean_enforcement}
             """
         else:
             prompt = f"""
             [역할] 월스트리트 수석 애널리스트
-            {base_info_block}
+            {prompt_header}
             [모드] {mode}
             [중점 분석] {focus}
             [투자 관점] {viewpoint}
             [분석 레벨] {analysis_depth}
-            **주의: '{ticker}'는 '{stock_name}'입니다. 다른 기업과 혼동하지 마십시오.**
             
             [추가 지시사항]
             {level_instruction}
@@ -582,10 +661,11 @@ def step_fetch_data(ticker, mode):
         return False
 
 # ---------------------------------------------------------
-# 5. 사이드바 UI
+# 5. 사이드바 UI (Compact Version)
 # ---------------------------------------------------------
 st.sidebar.subheader("🎯 분석 옵션")
 
+# [컴팩트] 슬라이더 간격 축소
 viewpoint_mapping = {"단기 (1주~1개월)": "3mo", "스윙 (1~3개월)": "6mo", "중기 (6개월~1년)": "2y", "장기 (1~3년)": "5y"}
 selected_viewpoint = st.sidebar.select_slider("", options=list(viewpoint_mapping.keys()), value="중기 (6개월~1년)", label_visibility="collapsed")
 st.session_state['selected_period_str'] = viewpoint_mapping[selected_viewpoint]
@@ -595,6 +675,7 @@ analysis_levels = ["1.요약", "2.표준", "3.심층", "4.전문가", "5.시나�
 analysis_depth = st.sidebar.select_slider("", options=analysis_levels, value=analysis_levels[-1], label_visibility="collapsed")
 st.session_state['analysis_depth'] = analysis_depth
 
+# 뉴스 토글 & 중점 항목 (밀착 배치)
 st.session_state['use_news'] = st.sidebar.toggle("뉴스 데이터 반영", value=True)
 
 def toggle_focus_all():
@@ -605,20 +686,24 @@ with st.sidebar.expander("☑️ 중점 분석 항목", expanded=False):
     st.checkbox("전체 선택", key="focus_all", on_change=toggle_focus_all)
     for opt in opt_targets: st.checkbox(opt, key=f"focus_{opt}")
 
+# Secrets Key Check
 api_key = None
 if "GEMINI_API_KEY" in st.secrets:
     api_key = st.secrets["GEMINI_API_KEY"]
 else:
     st.sidebar.error("⚠️ Secrets에 'GEMINI_API_KEY'가 설정되지 않았습니다.")
 
+# 탭 구성
 tab_search, tab_fav = st.sidebar.tabs(["⚡ 검색", "⭐ 포트폴리오"])
 prompt_mode_search = False
 prompt_mode_port = False
 
+# [단일 검색]
 with tab_search:
     st.markdown("<br>", unsafe_allow_html=True) 
     single_input = st.text_input("티커 (예: 005930.KS)", key="s_input")
     c_chk, c_btn = st.columns([0.5, 0.5])
+    # [수정] 프롬프트 모드 기본값 True로 설정
     with c_chk: prompt_mode_search = st.checkbox("☑️ 프롬프트만", key="chk_prompt_single", value=True)
     with c_btn: 
         if api_key or prompt_mode_search:
@@ -633,6 +718,7 @@ with tab_search:
     with c2: st.button("10-Q", key="btn_s_10q", on_click=handle_search_click, args=("10Q", prompt_mode_search))
     with c3: st.button("8-K", key="btn_s_8k", on_click=handle_search_click, args=("8K", prompt_mode_search))
 
+# [포트폴리오]
 selected_tickers = []
 if 'selected' in st.query_params:
     selected_str = st.query_params['selected']
@@ -645,11 +731,14 @@ with tab_fav:
     st.markdown("<br>", unsafe_allow_html=True)
     c1, c2 = st.columns([0.75, 0.25])
     with c1: st.text_input("종목 추가 (콤마 구분)", placeholder="AAPL, TSLA", label_visibility="collapsed", key="new_ticker_input")
+    # [수정] 콜백 로직을 add_ticker_logic으로 변경
     with c2: st.button("➕", on_click=add_ticker_logic)
 
+    # [핵심] CSV 파일이 아닌 Session State에서 데이터 가져옴
     fav_df = st.session_state.get('portfolio_df', pd.DataFrame(columns=['ticker', 'name']))
     
     if not fav_df.empty:
+        # 이미 선택된 상태 동기화
         for t in fav_df['ticker']:
             if st.session_state.get(f"chk_{t}", False):
                 if t not in selected_tickers: selected_tickers.append(t)
@@ -674,13 +763,16 @@ with tab_fav:
             grid_html = f"""<style>* {{margin: 0; padding: 0; box-sizing: border-box;}} .pf-wrapper {{font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;}} .pf-content {{background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; margin-top: 0px;}} .selected-display {{background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 8px 10px; margin-bottom: 10px; min-height: 32px;}} .selected-label {{font-size: 11px; color: #15803d; font-weight: 600; margin-bottom: 4px;}} .selected-tickers {{font-size: 12px; color: #166534; font-weight: 500; word-break: break-word;}} .selected-empty {{font-size: 11px; color: #9ca3af; font-style: italic;}} .select-all {{display: flex; align-items: center; gap: 8px; padding: 8px 0 10px 0; border-bottom: 1px solid #e2e8f0; margin-bottom: 10px;}} .select-all input[type="checkbox"] {{width: 16px; height: 16px; accent-color: #3b82f6; cursor: pointer;}} .select-all label {{font-size: 13px; color: #475569; cursor: pointer; user-select: none;}} .pf-grid-wrapper {{max-height: 240px; overflow-y: auto; overflow-x: hidden; padding-right: 4px;}} .pf-grid-wrapper::-webkit-scrollbar {{width: 6px;}} .pf-grid-wrapper::-webkit-scrollbar-track {{background: #f1f5f9; border-radius: 3px;}} .pf-grid-wrapper::-webkit-scrollbar-thumb {{background: #cbd5e1; border-radius: 3px;}} .pf-grid-wrapper::-webkit-scrollbar-thumb:hover {{background: #94a3b8;}} .pf-grid {{display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; width: 100%;}} .pf-item {{display: flex; align-items: center; gap: 5px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 5px 6px; height: 48px; transition: all 0.15s; cursor: pointer; min-width: 0; width: 100%; box-sizing: border-box; overflow: hidden;}} .pf-item:hover {{background: #f1f5f9; border-color: #cbd5e1;}} .pf-item.selected {{background: #eff6ff; border-color: #3b82f6;}} .pf-item input[type="checkbox"] {{width: 14px; height: 14px; accent-color: #3b82f6; cursor: pointer; flex-shrink: 0; margin: 0;}} .pf-info {{flex: 1; min-width: 0; overflow: hidden;}} .pf-ticker {{font-size: 11px; font-weight: 600; color: #1e293b; line-height: 1.2;}} .pf-name {{font-size: 9px; color: #9ca3af; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; line-height: 1.3; margin-top: 1px;}} .pf-delete {{background: none; border: none; color: #94a3b8; cursor: pointer; font-size: 14px; padding: 2px 4px; border-radius: 4px; transition: all 0.15s; flex-shrink: 0; line-height: 1;}} .pf-delete:hover {{color: #ef4444; background: #fef2f2;}}</style>
             <div class="pf-wrapper"><div class="pf-content" id="pfContent"><div class="selected-display"><div class="selected-label">✅ 선택된 종목</div><div class="selected-tickers" id="selectedDisplay"><span class="selected-empty">선택된 종목이 없습니다</span></div></div><div class="select-all"><input type="checkbox" id="selectAllCb"><label for="selectAllCb">전체 선택</label></div><div class="pf-grid-wrapper"><div class="pf-grid" id="pfGrid"></div></div></div></div>
             <script>const tickersData={tickers_json};let selectedTickers={initial_selected};function renderGrid(){{const grid=document.getElementById('pfGrid');grid.innerHTML='';tickersData.forEach((item,idx)=>{{const isSelected=selectedTickers.includes(item.ticker);const div=document.createElement('div');div.className='pf-item'+(isSelected?' selected':'');div.innerHTML=`<input type="checkbox" ${{isSelected?'checked':''}} data-ticker="${{item.ticker}}"><div class="pf-info"><div class="pf-ticker">${{item.ticker}}</div><div class="pf-name" title="${{item.name}}">${{item.name}}</div></div><button class="pf-delete" data-ticker="${{item.ticker}}">×</button>`;grid.appendChild(div);}});bindEvents();updateSelectAllState();updateAllDisplays();}}function updateAllDisplays(){{const display=document.getElementById('selectedDisplay');if(selectedTickers.length>0){{display.innerHTML=selectedTickers.join(', ');}}else{{display.innerHTML='<span class="selected-empty">선택된 종목이 없습니다</span>';}}}}function bindEvents(){{document.querySelectorAll('.pf-item input[type="checkbox"]').forEach(cb=>{{cb.addEventListener('change',function(e){{e.stopPropagation();const ticker=this.dataset.ticker;if(this.checked){{if(!selectedTickers.includes(ticker)){{selectedTickers.push(ticker);}}}}else{{selectedTickers=selectedTickers.filter(t=>t!==ticker);}}this.closest('.pf-item').classList.toggle('selected',this.checked);updateSelectAllState();updateAllDisplays();syncToStreamlit();}});}});document.querySelectorAll('.pf-delete').forEach(btn=>{{btn.addEventListener('click',function(e){{e.stopPropagation();const ticker=this.dataset.ticker;const item=this.closest('.pf-item');item.style.transform='scale(0.9)';item.style.opacity='0';setTimeout(()=>{{const url=new URL(window.parent.location.href);url.searchParams.set('del_ticker',ticker);window.parent.location.href=url.toString();}},150);}});}});document.querySelectorAll('.pf-item').forEach(item=>{{item.addEventListener('click',function(e){{if(e.target.tagName==='INPUT'||e.target.tagName==='BUTTON')return;const cb=this.querySelector('input[type="checkbox"]');cb.checked=!cb.checked;cb.dispatchEvent(new Event('change'));}});}});}}document.getElementById('selectAllCb').addEventListener('change',function(){{const isChecked=this.checked;document.querySelectorAll('.pf-item input[type="checkbox"]').forEach(cb=>{{cb.checked=isChecked;cb.closest('.pf-item').classList.toggle('selected',isChecked);}});if(isChecked){{selectedTickers=tickersData.map(t=>t.ticker);}}else{{selectedTickers=[];}}updateAllDisplays();syncToStreamlit();}});function updateSelectAllState(){{const allCheckboxes=document.querySelectorAll('.pf-item input[type="checkbox"]');const checkedCount=document.querySelectorAll('.pf-item input[type="checkbox"]:checked').length;const selectAllCb=document.getElementById('selectAllCb');selectAllCb.checked=checkedCount===allCheckboxes.length&&allCheckboxes.length>0;selectAllCb.indeterminate=checkedCount>0&&checkedCount<allCheckboxes.length;}}function syncToStreamlit(){{const url=new URL(window.parent.location.href);if(selectedTickers.length>0){{url.searchParams.set('selected',selectedTickers.join(','));}}else{{url.searchParams.delete('selected');}}window.parent.history.replaceState(null,'',url.toString());}}renderGrid();</script>"""
+            
             st.components.v1.html(grid_html, height=dynamic_height, scrolling=False)
             
     else:
         st.markdown("""<div style="display: flex; align-items: center; gap: 8px; padding: 8px 0;"><span style="font-size: 14px; font-weight: 600; color: #1e293b;">📂 포트폴리오</span><span style="font-size: 11px; color: #9ca3af; font-style: italic;">비어있음</span></div>""", unsafe_allow_html=True)
     st.markdown('<div style="height: 10px"></div>', unsafe_allow_html=True)
     
+    # 분석 버튼들
     c_chk_p, c_btn_p = st.columns([0.5, 0.5])
+    # [수정] 프롬프트 모드 기본값 True로 설정
     with c_chk_p: prompt_mode_port = st.checkbox("☑️ 프롬프트만", key="chk_prompt_port", value=True)
     with c_btn_p: 
         if st.button("🚀 종합 분석 시작", type="primary", key="btn_run_main"):
@@ -705,6 +797,7 @@ with tab_fav:
                 selected_tickers = [t.strip() for t in st.query_params['selected'].split(',') if t.strip()]
             start_analysis_process(selected_tickers, "10Q", prompt_mode_port)
 
+# [이동 완료] AI 모델 선택 (사이드바 최하단)
 st.sidebar.markdown('<hr>', unsafe_allow_html=True)
 st.sidebar.subheader("🤖 AI 모델 선택")
 model_options = [
@@ -718,6 +811,7 @@ model_options = [
 selected_model = st.sidebar.selectbox("기본 분석 모델", model_options, index=0, label_visibility="collapsed")
 st.session_state['selected_model'] = selected_model
 
+# [로그 시스템] 사이드바 최하단에 Expander 추가
 st.sidebar.markdown('<hr>', unsafe_allow_html=True)
 with st.sidebar.expander("📜 시스템 실행 로그 (System Logs)", expanded=False):
     log_text = "\n".join(st.session_state['log_buffer'])
@@ -727,7 +821,7 @@ with st.sidebar.expander("📜 시스템 실행 로그 (System Logs)", expanded=
         st.rerun()
 
 # ---------------------------------------------------------
-# 6. 실행 컨트롤러
+# 6. 실행 컨트롤러 (오토 드라이브)
 # ---------------------------------------------------------
 st.title(f"📈 AI Hyper-Analyst V86")
 
@@ -753,6 +847,7 @@ if st.session_state['is_analyzing']:
     current_progress = (current_idx * 2 + (1 if current_stage > 1 else 0)) / total_steps
     st.progress(current_progress, text=f"🚀 [{current_idx+1}/{len(targets)}] {curr_ticker} 분석 진행 중...")
 
+    # [Step 1] 데이터 수집
     if current_stage == 1:
         if current_idx == 0:
             collapse_sidebar()
@@ -773,6 +868,7 @@ if st.session_state['is_analyzing']:
             
             st.rerun() 
 
+    # [Step 2] AI 분석
     elif current_stage == 2:
         temp = st.session_state['temp_data']
         
