@@ -50,7 +50,7 @@ def add_log(message):
     if len(st.session_state['log_buffer']) > 500:
         st.session_state['log_buffer'].pop(0)
 
-# [변수 정의] 최상단 배치
+# [변수 정의] 최상단 배치 - 수정됨 (항목 추가)
 opt_targets = [
     "현금건전성 지표 (FCF, 유동비율, 부채비율)", 
     "핵심 재무제표 분석 (손익, 대차대조, 현금흐름)",
@@ -60,7 +60,7 @@ opt_targets = [
     "외국인/기관 수급 분석", 
     "경쟁사 비교 및 업황", 
     "단기/중기 매매 전략",
-    "투자성향별 포트폴리오 적정보유비중"
+    "투자성향별 포트폴리오 적정보유비중"  # 👈 [추가됨]
 ]
 
 # 상태 변수 초기화
@@ -462,6 +462,16 @@ def step_fetch_data(ticker, mode):
         level_instruction = ""
         if "5." in analysis_depth:
             level_instruction = "가장 낙관적인/비관적인 시나리오와 구체적인 미래 주가 예측(Target Price Range)을 포함하여 심층적으로 분석하십시오."
+        
+        # [수정] 투자성향별 비중 제안 프롬프트 추가 로직
+        if "투자성향별 포트폴리오 적정보유비중" in focus:
+            level_instruction += """
+            \n[특별 지시: 투자성향별 비중 제안]
+            사용자가 '투자성향별 포트폴리오 적정보유비중'을 요청했습니다. 보고서 결론 부분에 반드시 다음 3가지 투자 성향으로 나누어 전체 자산 대비 권장 보유 비중(%)과 논리를 각각 서술하십시오:
+            1. 🦁 공격적 투자자 (Aggressive): 높은 변동성 감내, 고수익 추구형.
+            2. ⚖️ 중립적 투자자 (Moderate): 성장과 안정의 균형 중시형.
+            3. 🛡️ 보수적 투자자 (Conservative): 원금 보존 및 리스크 최소화형.
+            """
 
         add_log(f"📝 프롬프트 조립 시작 (Mode: {mode})")
         if mode == "10K":
@@ -894,4 +904,3 @@ if not st.session_state['is_analyzing'] and st.session_state['analysis_results']
 
 elif not st.session_state['is_analyzing']:
     st.info("👈 왼쪽 사이드바에서 종목을 선택하고 분석 버튼을 눌러주세요.")
-
