@@ -250,163 +250,128 @@ def fetch_rss_realtime(url, limit=10):
 
 def get_realtime_news(ticker, name):
     """
-    뉴스 검색 - 정식 기업명 기반으로 검색하여 혼동 방지 (수정됨)
-    예: MS 티커 → "Morgan Stanley" 뉴스 검색 (Microsoft 아님)
+    [강력 보정 버전]
+    1. 헷갈리는 티커(MS, T, O 등)는 강제로 정식 명칭 지정
+    2. Google 검색 시 intitle: 명령어로 제목 포함 강제
+    3. 제외 키워드 발견 시 즉시 폐기
     """
-    add_log(f"📰 [NEWS] 뉴스 검색 시작: {ticker} ({name})")
-    news_items = []
-    is_kr = bool(re.search(r'\.KS|\.KQ|[0-9]{6}', ticker))
     
-    # [핵심 로직 1] 뉴스 관련성 검증 함수
-    def is_relevant_news(news_title, news_summary, company_name, ticker_symbol):
-        """뉴스가 해당 기업과 관련 있는지 확인"""
-        title_lower = news_title.lower() if news_title else ""
-        summary_lower = news_summary.lower() if news_summary else ""
-        combined_text = f"{title_lower} {summary_lower}"
-        
-        # 기업명 전처리 (Inc, Corp 등 제거하여 핵심 단어만 추출)
-        name_clean = company_name.lower()
-        for suffix in [' inc.', ' inc', ' corp.', ' corp', ' ltd.', ' ltd', ' llc', ' co.', ' co', 
-                       ' corporation', ' incorporated', ' limited', ' group', ' holdings']:
-            name_clean = name_clean.replace(suffix, '')
-        name_clean = name_clean.strip()
-        
-        # 이름이 아주 짧은 경우(3글자 이하)가 아니면 기업명 포함 여부 체크
-        if len(name_clean) > 2 and name_clean in combined_text:
-            return True
-            
-        # 티커가 명확하게 단독으로 쓰였는지 체크 (단어 경계 확인)
-        ticker_clean = ticker_symbol.replace('.KS', '').replace('.KQ', '').upper()
-        if re.search(rf'\b{re.escape(ticker_clean)}\b', news_title or ""):
-            return True
-            
-        return False
-    
-    # [핵심 로직 2] 혼동되기 쉬운 티커에 대한 제외 키워드 설정
-    exclude_keywords = {
-        'MS': ['microsoft', 'windows', 'azure', 'xbox', 'office 365', 'satya nadella', 'bill gates'], # MS(모건스탠리) vs Microsoft
-        'GM': [], 
-        'F': [],  
-        'T': [],  
-        'C': [],  
-        'O': [],  
-        'V': [],  
+    # 1. [강제 보정] 혼동하기 쉬운 티커 명시적 지정 (딕셔너리)
+    # yfinance를 믿지 않고, 우리가 직접 지정합니다.
+    explicit_names = {
+        'MS': 'Morgan Stanley',          # Microsoft 아님
+        'T': 'AT&T',                     # 단순히 T 문자가 아님
+        'O': 'Realty Income',            # 단순히 O 문자가 아님
+        'C': 'Citigroup',                # 단순히 C 문자가 아님
+        'F': 'Ford Motor',               # 단순히 F 문자가 아님
+        'V': 'Visa',                     # 단순히 V 문자가 아님
+        'M': 'Macy\'s',                  # 단순히 M 문자가 아님
+        'K': 'Kellanova',                # Kellogg
+        'Z': 'Zillow Group',
+        'GM': 'General Motors',
     }
     
-    def should_exclude(news_title, news_summary, ticker_symbol):
-        """혼동될 수 있는 뉴스(제외 키워드 포함) 걸러내기"""
-        if ticker_symbol.upper() not in exclude_keywords:
-            return False
-        
-        combined = f"{news_title} {news_summary}".lower()
-        for keyword in exclude_keywords.get(ticker_symbol.upper(), []):
-            if keyword in combined:
-                add_log(f"      ❌ 제외됨 (혼동 키워드 '{keyword}' 발견): {news_title[:40]}...")
-                return True
-        return False
+    # 제외해야 할 키워드 (Negative Filtering)
+    exclude_keywords = {
+        'MS': ['microsoft', 'windows', 'azure', 'xbox', 'office 365', 'bill gates', 'satya nadella', 'copilot'],
+        'T': [],
+        'O': [],
+        'C': [],
+        'F': [],
+        'V': [],
+    }
+
+    # 티커가 예외 목록에 있으면 그 이름을 우선 사용
+    clean_ticker = ticker.split('.')[0].upper() # .KS 등 제거
+    if clean_ticker in explicit_names:
+        search_name = explicit_names[clean_ticker]
+        add_log(f"🚨 [NEWS] '{ticker}'는 혼동 티커입니다. 검색어를 '{search_name}'로 강제 고정합니다.")
+    else:
+        # 그 외에는 전달받은 이름 사용하되, 너무 짧으면 풀네임 사용 유도
+        search_name = name
+
+    add_log(f"📰 [NEWS] 최종 검색 대상: {search_name} (Ticker: {ticker})")
     
-    # 1. Yahoo Finance RSS (티커 기반 - 가장 빠름)
+    news_items = []
+    is_kr = bool(re.search(r'\.KS|\.KQ|[0-9]{6}', ticker))
+
+    # 관련성 및 제외 키워드 체크 함수
+    def validate_news(title, summary, target_name, target_ticker):
+        text = (f"{title} {summary}").lower()
+        
+        # 1. 제외 키워드 체크 (가장 중요)
+        if clean_ticker in exclude_keywords:
+            for bad_word in exclude_keywords[clean_ticker]:
+                if bad_word in text:
+                    add_log(f"      🗑️ [필터] 제외 키워드 '{bad_word}' 발견 -> 삭제")
+                    return False
+        
+        # 2. 관련성 체크 (제목이나 요약에 기업명이 있는가?)
+        # 기업명 소문자로 변환 후 핵심 단어만 추출 (Inc, Corp 제거)
+        core_name = target_name.lower().replace(' inc.', '').replace(' corp.', '').replace(' group', '').strip()
+        
+        # 이름이 텍스트에 포함되어 있거나, 티커가 명확히 포함되어 있는지
+        if core_name in text:
+            return True
+        if re.search(rf'\b{re.escape(clean_ticker)}\b', title): # 제목에 티커가 단독으로 있는지 (예: $MS)
+            return True
+            
+        return False
+
+    # 1. Yahoo Finance RSS (미국 주식 우선)
     if not is_kr:
         try:
-            add_log(f"   Trying Yahoo Finance RSS for {ticker}...")
             rss_url = f"https://finance.yahoo.com/rss/headline?s={ticker}"
-            yahoo_rss_items = fetch_rss_realtime(rss_url, limit=10)
+            yahoo_items = fetch_rss_realtime(rss_url, limit=10)
             
-            filtered_items = []
-            for item in yahoo_rss_items:
-                # 혼동 키워드 체크 (예: MS 검색했는데 Microsoft 기사면 제외)
-                if should_exclude(item['title'], item.get('summary', ''), ticker):
-                    continue
-                item['source'] = "Yahoo Finance"
-                filtered_items.append(item)
+            valid_items = []
+            for item in yahoo_items:
+                if validate_news(item['title'], item.get('summary', ''), search_name, ticker):
+                    item['source'] = "Yahoo Finance"
+                    valid_items.append(item)
             
-            if filtered_items:
-                add_log(f"   -> Yahoo RSS 필터링 후 {len(filtered_items)}건 확보")
-                return filtered_items[:7]
+            if valid_items:
+                add_log(f"   -> Yahoo RSS에서 유효 뉴스 {len(valid_items)}건 확보")
+                return valid_items[:7]
         except Exception as e:
-            add_log(f"   ⚠️ Yahoo RSS Fail: {e}")
+            add_log(f"   ⚠️ Yahoo RSS Error: {e}")
 
-    # 2. yfinance 라이브러리 (티커 기반)
-    if not is_kr and not news_items:
-        try:
-            add_log(f"   Trying yfinance library for {ticker}...")
-            yf_obj = yf.Ticker(ticker)
-            yf_news = yf_obj.news
-            if yf_news:
-                filtered_items = []
-                for item in yf_news:
-                    title = item.get('title')
-                    link = item.get('link')
-                    summary = item.get('summary', '') 
-                    
-                    if not title or not link: continue
-                    if should_exclude(title, summary, ticker): continue
-                        
-                    pub_time = item.get('providerPublishTime', 0)
-                    try: date_str = datetime.datetime.fromtimestamp(pub_time).strftime("%m-%d %H:%M")
-                    except: date_str = "최신"
-                    
-                    filtered_items.append({
-                        'title': title, 'link': link, 'date_str': date_str, 
-                        'source': "Yahoo Finance", 'summary': summary
-                    })
-                
-                if filtered_items:
-                    add_log(f"   -> yfinance 필터링 후 {len(filtered_items)}건 확보")
-                    return filtered_items[:7]
-        except Exception as e:
-            add_log(f"   ⚠️ yfinance Fail: {e}")
-
-    # 3. Google News RSS (정식 기업명 검색 - 티커 혼동의 최후 보루)
-    if is_kr:
-        search_query = f'"{name}"' # 한국 주식은 이름으로 검색
-    else:
-        # 미국 주식: 이름이 있으면 이름으로 검색, 없으면 티커+stock
-        if name and name != ticker and len(name) > 3:
-            # 정식 기업명에서 불필요한 접미사 제거 후 검색 (검색 정확도 향상)
-            search_name = name
-            for suffix in [' Inc.', ' Inc', ' Corp.', ' Corp', ' Ltd.', ' Ltd', ' LLC', ' Co.', ' Co']:
-                search_name = search_name.replace(suffix, '')
-            search_query = f'"{search_name.strip()}" stock' # 따옴표로 정확히 일치하는 것 검색
-            add_log(f"   📌 정식 기업명으로 정밀 검색: '{search_query}' (티커 혼동 방지)")
-        else:
-            search_query = f'{ticker} stock'
-            add_log(f"   ⚠️ 기업명 불분명, 티커로 검색: '{search_query}'")
-    
-    add_log(f"   Trying Google News RSS with query: {search_query}")
+    # 2. Google News RSS (검색어 정밀화)
     try:
-        q_encoded = urllib.parse.quote(search_query)
-        url = f"https://news.google.com/rss/search?q={q_encoded}&hl=ko&gl=KR&ceid=KR:ko"
-        google_news = fetch_rss_realtime(url, limit=10)
-        
-        # Google News 결과 필터링
-        filtered_news = []
-        if google_news:
-            for n in google_news:
-                n['source'] = "Google News"
-                # 역시 혼동 키워드 체크
-                if should_exclude(n['title'], n.get('summary', ''), ticker):
-                    continue
-                # 관련성 체크
-                if is_relevant_news(n['title'], n.get('summary', ''), name, ticker):
-                    filtered_news.append(n)
-                else:
-                    # 너무 엄격하게 걸러서 뉴스가 0개가 되는 것을 방지하기 위해
-                    # 검색어(이름)가 제목에 없어도 요약에 있거나 하면 통과
-                    if name.lower() in (n.get('summary','') or '').lower():
-                        filtered_news.append(n)
-
-            add_log(f"   -> Google News 필터링: {len(google_news)}건 → {len(filtered_news)}건")
+        if is_kr:
+            # 한국 주식은 기업명 그대로
+            q = f'"{search_name}"'
+        else:
+            # [핵심] intitle: 명령어 사용 (제목에 기업명이 무조건 들어가야 함)
+            # 예: intitle:"Morgan Stanley" -Microsoft
+            q = f'intitle:"{search_name}"'
             
-            if filtered_news:
-                return filtered_news[:7]
-            elif google_news:
-                # 필터링 결과가 아예 없으면 원본 중 상위 3건만 반환 (완전 공백 방지)
-                add_log(f"   ⚠️ 필터링 결과 0건. 관련성 낮을 수 있으나 원본 반환.")
-                return google_news[:3]
+            # 제외 키워드가 있다면 구글 검색어 자체에서 배제
+            if clean_ticker in exclude_keywords:
+                for bad_word in exclude_keywords[clean_ticker][:2]: # 상위 2개만 쿼리에 추가
+                    q += f' -{bad_word}'
+        
+        add_log(f"   🔍 Google 검색 쿼리: {q}")
+        q_encoded = urllib.parse.quote(q)
+        url = f"https://news.google.com/rss/search?q={q_encoded}&hl=ko&gl=KR&ceid=KR:ko"
+        
+        google_items = fetch_rss_realtime(url, limit=10)
+        
+        valid_google = []
+        for n in google_items:
+            # 2차 검증 (API가 필터링 못했을 수 있으므로)
+            if validate_news(n['title'], n.get('summary', ''), search_name, ticker):
+                n['source'] = "Google News"
+                valid_google.append(n)
+        
+        add_log(f"   -> Google News 유효 뉴스 {len(valid_google)}건 확보")
+        
+        if valid_google:
+            return valid_google[:7]
+            
     except Exception as e:
-        add_log(f"   ⚠️ Google News Fail: {e}")
-    
+        add_log(f"   ⚠️ Google News Error: {e}")
+
     return news_items
 
 def get_company_info(ticker):
@@ -584,73 +549,71 @@ def step_fetch_data(ticker, mode):
     tv_symbol = f"KRX:{clean_code}" if is_kr else ticker
 
     try:
-        # =====================================================
-        # [핵심 수정] 기업 정보 (이름, 섹터, 산업) 먼저 조회하여 뉴스 검색에 활용
-        # =====================================================
+        # 1. 기업 정보 가져오기
         company_info = get_company_info(ticker)
         
-        # 기본적으로 API에서 가져온 긴 이름 사용 (예: "Morgan Stanley")
-        stock_name = company_info['long_name'] if company_info.get('long_name') else ticker
+        # 2. 이름 결정 로직
+        # API에서 가져온 긴 이름(Morgan Stanley)을 우선 사용
+        stock_name = company_info.get('long_name') or company_info.get('name') or ticker
         
-        # 포트폴리오에서 이름 확인 (우선순위)
+        # 포트폴리오에 저장된 이름이 더 길고 정확하다면 그것을 사용 (옵션)
         if 'portfolio_df' in st.session_state:
             p_df = st.session_state['portfolio_df']
             row = p_df[p_df['ticker'] == ticker]
             if not row.empty:
-                portfolio_name = row.iloc[0]['name']
-                if portfolio_name and portfolio_name != ticker:
-                    # 포트폴리오 이름이 'MS' 처럼 짧으면 API 이름(Morgan Stanley) 사용 유지
-                    if len(portfolio_name) > len(stock_name):
-                         stock_name = portfolio_name
+                saved_name = row.iloc[0]['name']
+                # 저장된 이름이 티커명과 다르고, 현재 파악된 이름보다 길다면 채택
+                if saved_name and saved_name != ticker and len(saved_name) > len(stock_name):
+                    stock_name = saved_name
         
-        add_log(f"   ℹ️ 분석 기준 기업명: {stock_name}")
+        add_log(f"   ℹ️ 식별된 기업명: {stock_name}")
 
+        # 주가 데이터 가져오기
         period = st.session_state.get('selected_period_str', '1y')
-        add_log(f"   - 주가 데이터 요청 (기간: {period})")
         df = run_with_timeout(_fetch_history, args=(ticker, period), timeout=10)
         
-        if df is None: 
-            df = pd.DataFrame()
-            add_log("   ⚠️ 주가 데이터 타임아웃/실패")
-        else:
-            add_log(f"   ✅ 주가 데이터 수신: {len(df)} rows")
-
+        if df is None: df = pd.DataFrame()
+        
+        # 데이터 요약 생성
         data_summary = "No Data"
         if not df.empty:
             curr = df['Close'].iloc[-1]; high_val = df['High'].max(); low_val = df['Low'].min()
-            stats_str = f"High: {high_val:.2f}, Low: {low_val:.2f}, Current: {curr:.2f}"
             display_df = df.tail(60); recent_days = df.tail(5)
-            data_summary = f"[Stats] {stats_str}\n[Trend]\n{display_df.to_string()}\n[Recent]\n{recent_days.to_string()}"
+            data_summary = f"[Stats] High: {high_val:.2f}, Low: {low_val:.2f}, Current: {curr:.2f}\n[Recent]\n{recent_days.to_string()}"
         else: curr = 0
 
         fin_str = "N/A"; news_text = "N/A"
         
         if mode not in ["10K", "10Q", "8K"]:
+            # 재무 지표
             try: 
                 fm = get_financial_metrics(ticker)
                 fin_str = str(fm) if fm else "N/A"
             except: pass
             
+            # 뉴스 가져오기 (수정된 강력 필터링 함수 호출)
             if st.session_state.get('use_news', True):
                 try:
-                    # [수정] 정식 기업명(stock_name)을 함께 전달
+                    # 여기서 식별된 stock_name을 넘기지만, 
+                    # get_realtime_news 내부에서 MS 같은 예외는 강제로 Morgan Stanley로 바꿉니다.
                     news = get_realtime_news(ticker, stock_name)
+                    
                     if news: 
                         formatted_news = []
                         for n in news:
                             title = n['title']
                             summary = n.get('summary', '')
+                            # 내용이 제목과 너무 같으면 요약 생략
                             if is_similar(title, summary): summary = ""
                             elif len(summary) > 200: summary = summary[:200] + "..."
+                            
                             item_str = f"- [{n.get('source', 'News')}] {title} ({n['date_str']})"
-                            if summary: item_str += f"\n  > 내용요약: {summary}"
+                            if summary: item_str += f"\n  > 요약: {summary}"
                             formatted_news.append(item_str)
                         news_text = "\n".join(formatted_news)
-                        add_log(f"   ✅ 뉴스 텍스트 생성 완료 ({len(news)}건)")
-                    else: news_text = "관련된 최신 뉴스가 없습니다."
+                    else: news_text = "관련된 최신 뉴스가 없습니다 (필터링됨)."
                 except Exception as e: 
-                    news_text = f"뉴스 가져오기 실패: {str(e)}"
-                    add_log(f"   ❌ 뉴스 처리 중 치명적 오류: {e}")
+                    news_text = f"뉴스 처리 실패: {str(e)}"
 
         selected_focus_list = []
         for opt in opt_targets:
@@ -1168,10 +1131,12 @@ def step_fetch_data(ticker, mode):
         # =====================================================
         # 기업 기본정보 섹션 생성
         # =====================================================
+        display_name = stock_name if stock_name != ticker else company_info['long_name']
+
         company_info_section = f"""
 ## 🏢 기업 기본 정보 (Company Overview)
 
-- **정식 기업명**: **{company_info['long_name']}**
+- **정식 기업명**: **{display_name}**
 - **티커(심볼)**: {ticker}
 - **섹터 (Sector)**: **{company_info['sector']}**
 - **산업 (Industry)**: **{company_info['industry']}**
@@ -1179,7 +1144,7 @@ def step_fetch_data(ticker, mode):
 - **시가총액**: {company_info['market_cap']}
 - **직원 수**: {company_info['employees']}
 
-⚠️ **확인**: 이 분석은 **{company_info['long_name']}** ({ticker})에 대한 것입니다. 
+⚠️ **확인**: 이 분석은 **{display_name}** ({ticker})에 대한 것입니다. 
 이 기업은 **{company_info['sector']}** 섹터의 **{company_info['industry']}** 산업에 속합니다.
 다른 기업과 혼동하지 마십시오.
 
@@ -1200,7 +1165,7 @@ def step_fetch_data(ticker, mode):
 [지시사항]
 당신은 월가 최고의 주식 애널리스트입니다.
 위 종목의 **최신 SEC 10-K 보고서**를 기반으로 기업의 기초 체력과 장기 비전을 심층 분석해 주세요.
-**주의: '{ticker}'는 '{company_info['long_name']}'입니다. 다른 기업과 혼동하지 마십시오.**
+**주의: '{ticker}'는 '{display_name}'입니다. 다른 기업과 혼동하지 마십시오.**
 필요하다면 Google Search 도구를 활용하여 최신 데이터를 교차 검증하세요.
 
 **[출력 형식]**
@@ -1241,7 +1206,7 @@ def step_fetch_data(ticker, mode):
 
 [지시사항]
 위 종목의 **최신 SEC 10-Q 보고서**를 기반으로 **직전 분기 대비 변화(Trend)**에 집중하여 분석 보고서를 작성하세요.
-**주의: '{ticker}'는 '{company_info['long_name']}'입니다.**
+**주의: '{ticker}'는 '{display_name}'입니다.**
 단기적인 실적 흐름과 경영진의 가이던스 변화를 포착하는 것이 핵심입니다.
 
 **[출력 형식]**
@@ -1279,7 +1244,7 @@ def step_fetch_data(ticker, mode):
 
 [지시사항]
 위 종목의 **최신 SEC 8-K 보고서**를 분석하여, 발생한 **특정 사건(Event)**의 내용과 주가에 미칠 영향을 즉각적으로 분석하세요.
-**주의: '{ticker}'는 '{company_info['long_name']}'입니다.**
+**주의: '{ticker}'는 '{display_name}'입니다.**
 가장 최근에 공시된 중요한 사건 하나에 집중하십시오.
 
 **[출력 형식]**
