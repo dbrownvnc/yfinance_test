@@ -32,7 +32,7 @@ if 'sidebar_state' not in st.session_state:
 
 st.set_page_config(
     layout="wide", 
-    page_title="AI Hyper-Analyst V86", 
+    page_title="AI Hyper-Analyst V87", 
     page_icon="📈",
     initial_sidebar_state=st.session_state['sidebar_state']
 )
@@ -200,39 +200,25 @@ def run_with_timeout(func, args=(), timeout=10):
 def _fetch_history(ticker, period): return yf.Ticker(ticker).history(period=period)
 def _fetch_info(ticker): return yf.Ticker(ticker).info
 
-# [NEW] 강력한 메타데이터 수집 함수 (Fallback 적용)
+# 메타데이터 수집 강화
 def get_extended_metadata(ticker):
-    """
-    티커의 이름, 섹터, 산업 정보를 최대한 긁어옵니다.
-    1. 포트폴리오 내장 정보
-    2. yfinance info
-    3. yfinance fast_info
-    4. (실패시) 프롬프트에 '검색 요청' 태그 달기
-    """
     name = ticker
     sector = "Unknown"
     industry = "Unknown"
     
-    # 1. 포트폴리오 확인
     if 'portfolio_df' in st.session_state:
         df = st.session_state['portfolio_df']
         row = df[df['ticker'] == ticker]
         if not row.empty:
             name = row.iloc[0]['name']
 
-    # 2. yfinance 시도
     try:
         t = yf.Ticker(ticker)
         info = run_with_timeout(lambda: t.info, timeout=4)
-        
         if info:
             name = info.get('shortName') or info.get('longName') or name
             sector = info.get('sector', 'Unknown')
             industry = info.get('industry', 'Unknown')
-        else:
-            # 3. fast_info 시도 (Fallback)
-            pass 
-            
     except Exception as e:
         add_log(f"⚠️ Metadata fetch fail: {e}")
 
@@ -369,7 +355,7 @@ def generate_with_fallback(prompt, api_key, start_model):
     last_error = None
     add_log(f"🧠 [AI] 모델 체인 시작: {fallback_chain}")
     
-    # [NEW] Google Search Tool 설정 (정보 누락 시 자동 검색)
+    # Google Search Tool 설정
     tools = [
         {'google_search_retrieval': {
             'dynamic_retrieval_config': {
@@ -383,12 +369,9 @@ def generate_with_fallback(prompt, api_key, start_model):
         try:
             start_time = time.time()
             add_log(f"   Attempting: {model_name}...")
-            
-            # 모델 생성 시 Tool 바인딩
             model = genai.GenerativeModel(model_name, tools=tools)
             response = model.generate_content(prompt)
             duration = time.time() - start_time
-            
             add_log(f"   ✅ [AI] 성공! ({model_name}, {duration:.2f}s)")
             return response.text, model_name 
         except Exception as e:
@@ -414,27 +397,20 @@ def step_fetch_data(ticker, mode):
     is_kr = (".KS" in ticker or ".KQ" in ticker or (ticker.isdigit() and len(ticker)==6))
     tv_symbol = f"KRX:{clean_code}" if is_kr else ticker
 
-    # [NEW] 메타데이터 수집 강화 로직
     name, sector, industry = get_extended_metadata(ticker)
     
-    # 정보가 여전히 Unknown이면, AI에게 넘길 프롬프트 변수에 '검색 지시'를 포함시킴
     meta_info_instruction = ""
     if sector == "Unknown" or industry == "Unknown" or name == ticker:
         meta_info_instruction = f"""
         **[중요: 메타데이터 누락 발생]**
-        현재 입력된 데이터에서 기업명, 섹터(Sector), 산업(Industry) 정보를 명확히 가져오지 못했습니다.
+        현재 입력된 데이터에서 기업명, 섹터, 산업 정보를 명확히 가져오지 못했습니다.
         **반드시 Google Search 기능을 사용하여 '{ticker}'의 정확한 '공식 기업명', '섹터', '산업'을 찾아 분석에 반영하십시오.**
-        분석 보고서 상단에 해당 정보를 직접 채워서 출력해야 합니다.
         """
         add_log(f"   ⚠️ 메타데이터 누락 감지 -> AI 자동 검색 지시 추가됨")
-    else:
-        add_log(f"   ✅ 메타데이터 확보: {name} / {sector} / {industry}")
 
     try:
-        # 주가 데이터
         period = st.session_state.get('selected_period_str', '1y')
         df = run_with_timeout(_fetch_history, args=(ticker, period), timeout=10)
-        
         if df is None: df = pd.DataFrame()
         
         data_summary = "No Data"
@@ -445,7 +421,6 @@ def step_fetch_data(ticker, mode):
             data_summary = f"[Stats] {stats_str}\n[Trend]\n{display_df.to_string()}\n[Recent]\n{recent_days.to_string()}"
 
         fin_str = "N/A"; news_text = "N/A"
-        
         if mode not in ["10K", "10Q", "8K"]:
             try: 
                 fm = get_financial_metrics(ticker); fin_str = str(fm) if fm else "N/A"
@@ -469,133 +444,108 @@ def step_fetch_data(ticker, mode):
                 except Exception as e: 
                     news_text = f"뉴스 가져오기 실패: {str(e)}"
 
+        # [핵심 수정] 선택된 분석 항목을 단순 나열이 아닌 '강제 목차 리스트'로 변환
         selected_focus_list = []
         for opt in opt_targets:
             if st.session_state.get(f"focus_{opt}", True): selected_focus_list.append(opt)
-        focus = ", ".join(selected_focus_list)
+        
+        # 리스트를 불렛 포인트 문자열로 변환
+        formatted_focus_list = "\n".join([f"- {item}" for item in selected_focus_list])
+        
+        focus_instruction = f"""
+        **[필수 포함 섹션 (REQUIRED SECTIONS)]**
+        사용자가 아래 항목들에 대한 상세 분석을 요청했습니다. 
+        보고서 작성 시, **아래 나열된 각 항목에 대해 별도의 섹션(Markdown Header)을 만들어 빠짐없이 기술하십시오.**
+        데이터가 'Data Summary'에 없다면, **반드시 Google Search를 수행하여 데이터를 찾아서 채워 넣으십시오.** 생략하지 마십시오.
+        
+        {formatted_focus_list}
+        """
+
         viewpoint = st.session_state.get('selected_viewpoint', 'General')
         analysis_depth = st.session_state.get('analysis_depth', "2. 표준 브리핑 (Standard)")
         
-        # [NEW] 시나리오 분석 시 확률 명시 요청 로직 추가
         scenario_instruction = ""
-        if "5." in analysis_depth: # 시나리오 모드일 때
+        if "5." in analysis_depth:
             scenario_instruction = """
             \n[특별 지시: 시나리오별 확률 분석]
-            사용자가 심층 시나리오 분석을 요청했습니다. 
-            반드시 **Best Case(최상의 시나리오)**, **Base Case(기본 시나리오)**, **Worst Case(최악의 시나리오)** 3가지로 나누어 서술하십시오.
-            그리고 각 시나리오마다 **'실현 가능성(Probability)'을 백분율(%)로 추정하여 명시**하고, 그 확률을 도출한 논리적 근거(변수, 리스크, 모멘텀 등)를 설명하십시오.
-            (예: Best Case: 20% - AI 반도체 수요 폭증 지속 시...)
+            반드시 **Best Case**, **Base Case**, **Worst Case** 3가지로 나누어 서술하십시오.
+            각 시나리오마다 **'실현 가능성(Probability)'을 백분율(%)로 추정하여 명시**하고, 근거를 설명하십시오.
             """
 
-        if "투자성향별 포트폴리오 적정보유비중" in focus:
+        if "투자성향별 포트폴리오 적정보유비중" in formatted_focus_list:
             scenario_instruction += """
             \n[특별 지시: 투자성향별 비중 제안]
-            보고서 결론 부분에 반드시 다음 3가지 투자 성향으로 나누어 전체 자산 대비 권장 보유 비중(%)과 논리를 각각 서술하십시오:
+            보고서 결론 부분에 반드시 다음 3가지 투자 성향으로 나누어 권장 보유 비중(%)과 논리를 서술하십시오:
             1. 🦁 공격적 투자자 (Aggressive)
             2. ⚖️ 중립적 투자자 (Moderate)
             3. 🛡️ 보수적 투자자 (Conservative)
             """
 
         growth_value_logic = """
-        [핵심 지시사항: 성장주 vs 가치주 판단 및 맞춤 분석]
-        1. 먼저 이 기업이 **'성장주(Growth Stock)'**인지 **'가치주(Value Stock)'**인지 판단하고 이유를 서술하십시오.
-        2. 판단된 성향에 따라 아래 항목을 중점 분석하십시오.
-        **(A) 성장주:** 매출 성장률(5년), Cash Flow 증가 여부, ROI 개선, Profit Margin 흑자전환/확대, 지속성.
-        **(B) 가치주:** 시장 점유율 추이, 배당금 안정성, 주가 변동성(Beta), 이익률 변화, EPS 트렌드.
+        [핵심 지시사항: 성장주 vs 가치주 판단]
+        1. 이 기업이 **'성장주'**인지 **'가치주'**인지 먼저 규정하십시오.
+        2. 성향에 따라 성장성(매출, 이익) 또는 안정성(배당, 점유율)을 중점 분석하십시오.
         """
         
         korean_enforcement = "\n\n**[중요] 모든 답변은 반드시 자연스러운 '한국어(Korean)'로 작성해야 합니다.**"
-
-        # [NEW] 프롬프트 상단에 메타데이터 명시 (Unknown일 경우 AI가 채우도록 유도)
-        header_info = f"""
-        [대상 티커] {ticker}
-        [공식 기업명] {name}
-        [섹터(Sector)] {sector}
-        [산업(Industry)] {industry}
-        {meta_info_instruction}
-        """
-
-        common_prompt_base = f"""
-        {header_info}
-        **주의: '{ticker}'가 어떤 기업인지 정확히 식별하고, 다른 기업과 혼동하지 마십시오.**
-        만약 위 섹터/산업 정보가 'Unknown'이라면, 당신이 가진 지식이나 검색 도구를 활용해 정확한 정보를 먼저 정의하고 분석을 시작하십시오.
-        """
+        header_info = f"[대상 티커] {ticker}\n[공식 기업명] {name}\n[섹터] {sector}\n[산업] {industry}\n{meta_info_instruction}"
+        common_base = f"{header_info}\n**주의: '{ticker}'를 정확히 식별하십시오.**\n"
 
         if mode == "10K":
             prompt = f"""
-            [역할] 월가 수석 애널리스트 (펀더멘털 & 장기 투자 전문가)
-            [자료] 최신 SEC 10-K 보고서 (Annual Report)
-            
-            {common_prompt_base}
-            
+            [역할] 월가 수석 애널리스트
+            [자료] SEC 10-K 보고서
+            {common_base}
             [지시사항]
-            위 종목의 **최신 SEC 10-K 보고서**를 기반으로 기업의 기초 체력과 장기 비전을 심층 분석해 주세요.
-            필요하다면 Google Search 도구를 활용하여 최신 데이터를 교차 검증하세요.
-            
-            **[출력 형식]**
-            - 마크다운(Markdown) 형식을 사용하여 깔끔하게 작성하세요.
-            
-            **[필수 분석 항목]**
-            1. **비즈니스 개요 (Overview)**
-            2. **MD&A 및 미래 전망 (Outlook)**: 경영진의 톤(Tone) 분석 포함.
-            3. **핵심 리스크 및 법적 이슈 (Risk & Legal)**
-            4. **재무제표 정밀 분석 (Financials)**: 부채 만기 구조 등.
-            5. **주요 이벤트 (Key Events)**
-            
-            [결론]
-            기업의 장기적인 투자가치와 해자(Moat)에 대한 종합 평가.
+            10-K 보고서를 기반으로 기업의 기초 체력을 분석하십시오.
+            [필수 항목]
+            1. 비즈니스 개요
+            2. MD&A 및 전망
+            3. 리스크 및 법적 이슈
+            4. 재무제표 분석
+            5. 주요 이벤트
+            [결론] 장기 투자 가치 평가.
             {korean_enforcement}
             """
         elif mode == "10Q":
             prompt = f"""
-            [역할] 실적 모멘텀 및 트렌드 분석가
-            [자료] 최신 SEC 10-Q 보고서 (Quarterly Report)
-            
-            {common_prompt_base}
-            
+            [역할] 트렌드 분석가
+            [자료] SEC 10-Q 보고서
+            {common_base}
             [지시사항]
-            **직전 분기 대비 변화(Trend)**에 집중하여 분석 보고서를 작성하세요.
-            
-            **[필수 분석 항목]**
-            1. **실적 요약**: YoY, QoQ 변화 및 컨센서스 상회 여부.
-            2. **가이던스 변화**: 상향/하향 여부 및 근거.
-            3. **부문별 성과**: 급성장/둔화 부문 식별.
-            4. **현금흐름 및 비용**: 효율성 분석.
-            
-            [결론]
-            이번 분기 실적의 지속성 판단 및 단기 투자 매력도.
+            직전 분기 대비 변화(Trend)에 집중하십시오.
+            [필수 항목]
+            1. 실적 요약 (YoY, QoQ)
+            2. 가이던스 변화
+            3. 부문별 성과
+            4. 현금흐름
+            [결론] 실적 지속성 판단.
             {korean_enforcement}
             """
         elif mode == "8K":
             prompt = f"""
-            [역할] 속보 뉴스 데스크 / 이벤트 드리븐 트레이더
-            [자료] 최신 SEC 8-K 보고서 (Current Report)
-            
-            {common_prompt_base}
-            
+            [역할] 뉴스 속보 데스크
+            [자료] SEC 8-K 보고서
+            {common_base}
             [지시사항]
-            가장 최근 발생한 **특정 사건(Event)**의 내용과 주가 영향을 즉각 분석하세요.
-            
-            **[필수 분석 항목]**
-            1. **공시 사유**: 8-K 제출의 핵심 트리거.
-            2. **세부 내용**: 팩트 체크 (금액, 인물 등).
-            3. **호재/악재 판별**: 시장 서프라이즈 여부.
-            
-            [결론]
-            즉각적인 대응 전략 (매수/매도/관망).
+            최근 공시된 사건과 주가 영향을 분석하십시오.
+            [필수 항목]
+            1. 공시 사유
+            2. 세부 팩트 체크
+            3. 호재/악재 판별
+            [결론] 즉각 대응 전략.
             {korean_enforcement}
             """
         else:
             prompt = f"""
             [역할] 월스트리트 수석 애널리스트
             [모드] {mode}
-            [중점 분석] {focus}
             [투자 관점] {viewpoint}
             [분석 레벨] {analysis_depth}
             
-            {common_prompt_base}
+            {common_base}
             
-            [추가 지시사항]
+            {focus_instruction}
             {scenario_instruction}
             {growth_value_logic}
             
@@ -609,11 +559,11 @@ def step_fetch_data(ticker, mode):
             {news_text}
             
             [지시사항]
-            위 데이터를 바탕으로 전문적이고 종합적인 투자 보고서를 작성하십시오.
-            **뉴스 분석 시, 제목뿐만 아니라 제공된 '내용요약'을 참고하여 구체적인 원인과 영향을 파악하십시오.**
-            보고서는 가독성 있게 마크다운 형식으로 작성하고, 불필요한 서론 없이 본론부터 명확히 서술하십시오.
+            위 데이터를 바탕으로 종합 투자 보고서를 작성하십시오.
+            **[필수 포함 섹션]에 나열된 모든 항목을 하나도 빠짐없이 다루어야 합니다.**
+            데이터가 부족하면 검색 도구를 활용하여 내용을 보강하십시오.
             
-            결론 부분에는 반드시 [매수 / 매도 / 관망] 중 하나의 명확한 투자 의견을 제시하십시오.
+            결론에는 [매수 / 매도 / 관망] 의견을 명확히 제시하십시오.
             {korean_enforcement}
             """
         
@@ -634,7 +584,6 @@ def step_fetch_data(ticker, mode):
 # ---------------------------------------------------------
 st.sidebar.subheader("🎯 분석 옵션")
 
-# [컴팩트] 슬라이더 간격 축소
 viewpoint_mapping = {"단기 (1주~1개월)": "3mo", "스윙 (1~3개월)": "6mo", "중기 (6개월~1년)": "2y", "장기 (1~3년)": "5y"}
 selected_viewpoint = st.sidebar.select_slider("", options=list(viewpoint_mapping.keys()), value="중기 (6개월~1년)", label_visibility="collapsed")
 st.session_state['selected_period_str'] = viewpoint_mapping[selected_viewpoint]
@@ -644,7 +593,6 @@ analysis_levels = ["1.요약", "2.표준", "3.심층", "4.전문가", "5.시나�
 analysis_depth = st.sidebar.select_slider("", options=analysis_levels, value=analysis_levels[-1], label_visibility="collapsed")
 st.session_state['analysis_depth'] = analysis_depth
 
-# 뉴스 토글 & 중점 항목 (밀착 배치)
 st.session_state['use_news'] = st.sidebar.toggle("뉴스 데이터 반영", value=True)
 
 def toggle_focus_all():
@@ -655,24 +603,20 @@ with st.sidebar.expander("☑️ 중점 분석 항목", expanded=False):
     st.checkbox("전체 선택", key="focus_all", on_change=toggle_focus_all)
     for opt in opt_targets: st.checkbox(opt, key=f"focus_{opt}")
 
-# Secrets Key Check
 api_key = None
 if "GEMINI_API_KEY" in st.secrets:
     api_key = st.secrets["GEMINI_API_KEY"]
 else:
     st.sidebar.error("⚠️ Secrets에 'GEMINI_API_KEY'가 설정되지 않았습니다.")
 
-# 탭 구성
 tab_search, tab_fav = st.sidebar.tabs(["⚡ 검색", "⭐ 포트폴리오"])
 prompt_mode_search = False
 prompt_mode_port = False
 
-# [단일 검색]
 with tab_search:
     st.markdown("<br>", unsafe_allow_html=True) 
     single_input = st.text_input("티커 (예: 005930.KS)", key="s_input")
     c_chk, c_btn = st.columns([0.5, 0.5])
-    # [수정] 프롬프트 모드 기본값 True로 설정
     with c_chk: prompt_mode_search = st.checkbox("☑️ 프롬프트만", key="chk_prompt_single", value=True)
     with c_btn: 
         if api_key or prompt_mode_search:
@@ -687,7 +631,6 @@ with tab_search:
     with c2: st.button("10-Q", key="btn_s_10q", on_click=handle_search_click, args=("10Q", prompt_mode_search))
     with c3: st.button("8-K", key="btn_s_8k", on_click=handle_search_click, args=("8K", prompt_mode_search))
 
-# [포트폴리오]
 selected_tickers = []
 if 'selected' in st.query_params:
     selected_str = st.query_params['selected']
@@ -700,14 +643,11 @@ with tab_fav:
     st.markdown("<br>", unsafe_allow_html=True)
     c1, c2 = st.columns([0.75, 0.25])
     with c1: st.text_input("종목 추가 (콤마 구분)", placeholder="AAPL, TSLA", label_visibility="collapsed", key="new_ticker_input")
-    # [수정] 콜백 로직을 add_ticker_logic으로 변경
     with c2: st.button("➕", on_click=add_ticker_logic)
 
-    # [핵심] CSV 파일이 아닌 Session State에서 데이터 가져옴
     fav_df = st.session_state.get('portfolio_df', pd.DataFrame(columns=['ticker', 'name']))
     
     if not fav_df.empty:
-        # 이미 선택된 상태 동기화
         for t in fav_df['ticker']:
             if st.session_state.get(f"chk_{t}", False):
                 if t not in selected_tickers: selected_tickers.append(t)
@@ -739,9 +679,7 @@ with tab_fav:
         st.markdown("""<div style="display: flex; align-items: center; gap: 8px; padding: 8px 0;"><span style="font-size: 14px; font-weight: 600; color: #1e293b;">📂 포트폴리오</span><span style="font-size: 11px; color: #9ca3af; font-style: italic;">비어있음</span></div>""", unsafe_allow_html=True)
     st.markdown('<div style="height: 10px"></div>', unsafe_allow_html=True)
     
-    # 분석 버튼들
     c_chk_p, c_btn_p = st.columns([0.5, 0.5])
-    # [수정] 프롬프트 모드 기본값 True로 설정
     with c_chk_p: prompt_mode_port = st.checkbox("☑️ 프롬프트만", key="chk_prompt_port", value=True)
     with c_btn_p: 
         if st.button("🚀 종합 분석 시작", type="primary", key="btn_run_main"):
@@ -766,7 +704,6 @@ with tab_fav:
                 selected_tickers = [t.strip() for t in st.query_params['selected'].split(',') if t.strip()]
             start_analysis_process(selected_tickers, "10Q", prompt_mode_port)
 
-# [이동 완료] AI 모델 선택 (사이드바 최하단)
 st.sidebar.markdown('<hr>', unsafe_allow_html=True)
 st.sidebar.subheader("🤖 AI 모델 선택")
 model_options = [
@@ -780,7 +717,6 @@ model_options = [
 selected_model = st.sidebar.selectbox("기본 분석 모델", model_options, index=0, label_visibility="collapsed")
 st.session_state['selected_model'] = selected_model
 
-# [로그 시스템] 사이드바 최하단에 Expander 추가
 st.sidebar.markdown('<hr>', unsafe_allow_html=True)
 with st.sidebar.expander("📜 시스템 실행 로그 (System Logs)", expanded=False):
     log_text = "\n".join(st.session_state['log_buffer'])
@@ -789,10 +725,7 @@ with st.sidebar.expander("📜 시스템 실행 로그 (System Logs)", expanded=
         st.session_state['log_buffer'] = []
         st.rerun()
 
-# ---------------------------------------------------------
-# 6. 실행 컨트롤러 (오토 드라이브)
-# ---------------------------------------------------------
-st.title(f"📈 AI Hyper-Analyst V86")
+st.title(f"📈 AI Hyper-Analyst V87")
 
 if st.session_state['is_analyzing']:
     targets = st.session_state['targets_to_run']
@@ -816,7 +749,6 @@ if st.session_state['is_analyzing']:
     current_progress = (current_idx * 2 + (1 if current_stage > 1 else 0)) / total_steps
     st.progress(current_progress, text=f"🚀 [{current_idx+1}/{len(targets)}] {curr_ticker} 분석 진행 중...")
 
-    # [Step 1] 데이터 수집
     if current_stage == 1:
         if current_idx == 0:
             collapse_sidebar()
@@ -837,7 +769,6 @@ if st.session_state['is_analyzing']:
             
             st.rerun() 
 
-    # [Step 2] AI 분석
     elif current_stage == 2:
         temp = st.session_state['temp_data']
         
@@ -870,9 +801,6 @@ if st.session_state['is_analyzing']:
         st.session_state['proc_stage'] = 1 
         st.rerun() 
 
-# ---------------------------------------------------------
-# 7. 결과 출력
-# ---------------------------------------------------------
 if not st.session_state['is_analyzing'] and st.session_state['analysis_results']:
     st.write("---")
     for ticker, data in st.session_state['analysis_results'].items():
