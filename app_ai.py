@@ -398,26 +398,41 @@ def step_fetch_data(ticker, mode):
 
     try:
         stock = yf.Ticker(ticker)
-        # Session State에서 이름 가져오기 시도
-        try:
-            if 'portfolio_df' in st.session_state:
-                p_df = st.session_state['portfolio_df']
-                row = p_df[p_df['ticker'] == ticker]
-                if not row.empty:
-                    stock_name = row.iloc[0]['name']
-                    add_log(f"   - 이름(포트폴리오): {stock_name}")
-                else:
-                    info = stock.info
-                    fetched_name = info.get('shortName') or info.get('longName')
-                    if fetched_name: stock_name = fetched_name
-                    add_log(f"   - 이름(yfinance): {stock_name}")
+        
+        # [NEW] 기업 기본 정보(Overview) 수집
+        # 이름, 섹터, 산업, 국가, 시총, 직원수
+        info = run_with_timeout(_fetch_info, args=(ticker,), timeout=5)
+        if not info: info = {}
+        
+        # Session State 이름 우선 사용
+        if 'portfolio_df' in st.session_state:
+            p_df = st.session_state['portfolio_df']
+            row = p_df[p_df['ticker'] == ticker]
+            if not row.empty:
+                stock_name = row.iloc[0]['name']
             else:
-                info = stock.info
-                # [수정] shortName을 우선으로 가져오도록 함
                 fetched_name = info.get('shortName') or info.get('longName')
                 if fetched_name: stock_name = fetched_name
-        except: pass
+        else:
+            fetched_name = info.get('shortName') or info.get('longName')
+            if fetched_name: stock_name = fetched_name
             
+        # Overview 변수 추출
+        sector = info.get('sector', 'N/A')
+        industry = info.get('industry', 'N/A')
+        country = info.get('country', 'N/A')
+        employees = info.get('fullTimeEmployees', 'N/A')
+        if employees != 'N/A': employees = f"{employees:,}명"
+        
+        mkt_cap_raw = info.get('marketCap', 'N/A')
+        if isinstance(mkt_cap_raw, (int, float)):
+             # 조 단위(Billion) 등 적절한 포맷팅 (달러 기준)
+             mkt_cap = f"${mkt_cap_raw / 1_000_000_000:,.2f}B"
+        else:
+             mkt_cap = "N/A"
+
+        add_log(f"   - 기본 정보 확보: {stock_name} / {sector} / {industry}")
+
         period = st.session_state.get('selected_period_str', '1y')
         add_log(f"   - 주가 데이터 요청 (기간: {period})")
         df = run_with_timeout(_fetch_history, args=(ticker, period), timeout=10)
@@ -439,6 +454,8 @@ def step_fetch_data(ticker, mode):
         fin_str = "N/A"; news_text = "N/A"
         
         if mode not in ["10K", "10Q", "8K"]:
+            # get_financial_metrics 내부에서도 _fetch_info를 호출하지만
+            # 편의상 그대로 둠 (캐싱될 수 있음)
             try: 
                 fm = get_financial_metrics(ticker); fin_str = str(fm) if fm else "N/A"
             except: pass
@@ -583,7 +600,7 @@ def step_fetch_data(ticker, mode):
             **모든 답변은 반드시 한글로 작성해 주십시오.**
             """
         else:
-            # [수정] 지시사항 명확화: 성장주/가치주 분석 + 사용자 선택 항목 분석 + 포트폴리오 비중
+            # [수정] 지시사항 명확화: Overview 추가 + 성장주/가치주 + 선택 항목 + 포트폴리오
             prompt = f"""
             [역할] 월스트리트 수석 애널리스트
             [대상] {ticker} (공식 기업명: {stock_name})
@@ -604,15 +621,27 @@ def step_fetch_data(ticker, mode):
             {news_text}
             
             [분석 지침]
-            **다음의 1, 2, 3번 항목을 순서대로 모두 포함하여 보고서를 작성하십시오.**
+            **다음의 0번부터 3번 항목까지 순서대로 모두 포함하여 보고서를 작성하십시오.**
+
+            0. **[기업 기본 정보 (Company Overview)]**
+               - 보고서의 **가장 첫 부분**에 다음 데이터를 사용하여 **마크다운 표**를 작성하십시오.
+               - 표 헤더: | 항목 | 내용 |
+               - 표 데이터:
+                 | 정식 기업명 | {stock_name} |
+                 | 티커(심볼) | {ticker} |
+                 | 섹터 (Sector) | {sector} |
+                 | 산업 (Industry) | {industry} |
+                 | 국가 | {country} |
+                 | 시가총액 | {mkt_cap} |
+                 | 직원 수 | {employees} |
 
             1. **[성장주/가치주 정의 및 핵심 지표 분석]**
-               - 가장 먼저 이 기업이 '성장주(Growth Stock)'인지 '가치주(Value Stock)'인지 규명하십시오.
+               - 이 기업이 '성장주(Growth Stock)'인지 '가치주(Value Stock)'인지 규명하십시오.
                - **성장주라면**: 매출 성장률(5년 추이), Cash Flow 증가세, ROI 개선, Profit Margin 방향성, 실적 지속성을 중점 분석.
                - **가치주라면**: 시장 점유율 추이, 배당금 안정성, 주가 안정성, 이익률(Margin) 변화, EPS 트렌드를 중점 분석.
 
             2. **[사용자 선택 중점 분석 항목 상세]**
-               - 위 {focus} 목록에 포함된 항목들을 빠짐없이 상세하게 분석하십시오.
+               - 위 [중점 분석] 리스트({focus})에 포함된 항목들을 빠짐없이 상세하게 분석하십시오.
                - 예: **투자기관 컨센서스/목표주가**, **뉴스 호재/악재**, **기술적 지표(RSI, 이평선)**, **수급(외국인/기관)**, **경쟁사 비교**, **매매 전략** 등이 포함되어 있다면 반드시 해당 내용을 구체적으로 서술해야 합니다.
 
             3. **[투자성향별 포트폴리오 비중 분석]** (만약 '투자성향별 포트폴리오 적정보유비중'이 선택되었다면):
@@ -624,7 +653,7 @@ def step_fetch_data(ticker, mode):
             [출력 형식]
             - 보고서는 가독성 있게 마크다운 형식으로 작성하십시오.
             - **모든 답변은 반드시 '한글'로 작성하십시오.** (전문 용어는 괄호 안에 영문 병기)
-            - 불필요한 서론은 생략하고 본론부터 명확히 서술하십시오.
+            - 불필요한 서론은 생략하고 0번 표부터 바로 시작하십시오.
             
             [결론]
             반드시 [매수 / 매도 / 관망] 중 하나의 명확한 투자 의견을 제시하십시오.
