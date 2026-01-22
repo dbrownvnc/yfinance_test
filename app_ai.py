@@ -400,7 +400,6 @@ def step_fetch_data(ticker, mode):
         stock = yf.Ticker(ticker)
         
         # [NEW] 기업 기본 정보(Overview) 수집
-        # 이름, 섹터, 산업, 국가, 시총, 직원수
         info = run_with_timeout(_fetch_info, args=(ticker,), timeout=5)
         if not info: info = {}
         
@@ -454,8 +453,6 @@ def step_fetch_data(ticker, mode):
         fin_str = "N/A"; news_text = "N/A"
         
         if mode not in ["10K", "10Q", "8K"]:
-            # get_financial_metrics 내부에서도 _fetch_info를 호출하지만
-            # 편의상 그대로 둠 (캐싱될 수 있음)
             try: 
                 fm = get_financial_metrics(ticker); fin_str = str(fm) if fm else "N/A"
             except: pass
@@ -488,9 +485,17 @@ def step_fetch_data(ticker, mode):
         viewpoint = st.session_state.get('selected_viewpoint', 'General')
         analysis_depth = st.session_state.get('analysis_depth', "2. 표준 브리핑 (Standard)")
         
+        # [수정] 시나리오 모드일 경우 추가 지침 설정
         level_instruction = ""
+        scenario_block = ""
         if "5." in analysis_depth:
-            level_instruction = "가장 낙관적인/비관적인 시나리오와 구체적인 미래 주가 예측(Target Price Range)을 포함하여 심층적으로 분석하십시오."
+            level_instruction = "이 분석은 '시나리오 모드'입니다. 미래 불확실성을 고려하여 확률적 접근이 필수적입니다."
+            scenario_block = """
+            4. **[시나리오별 확률 및 근거 (Scenario Analysis)]**
+               - **Bull (낙관) / Base (기본) / Bear (비관)** 3가지 시나리오를 설정하십시오.
+               - 각 시나리오별 **예상 주가 밴드**와 **실현 확률(%)**을 명시적으로 제시하십시오.
+               - 왜 그러한 확률이 배정되었는지에 대한 **논리적/정량적 근거**를 상세히 설명하십시오.
+            """
 
         add_log(f"📝 프롬프트 조립 시작 (Mode: {mode})")
         if mode == "10K":
@@ -600,7 +605,7 @@ def step_fetch_data(ticker, mode):
             **모든 답변은 반드시 한글로 작성해 주십시오.**
             """
         else:
-            # [수정] 지시사항 명확화: Overview 추가 + 성장주/가치주 + 선택 항목 + 포트폴리오
+            # [수정] 지시사항 명확화: Overview + 성장주/가치주 + 선택 항목 + 포트폴리오 + (시나리오)
             prompt = f"""
             [역할] 월스트리트 수석 애널리스트
             [대상] {ticker} (공식 기업명: {stock_name})
@@ -621,7 +626,7 @@ def step_fetch_data(ticker, mode):
             {news_text}
             
             [분석 지침]
-            **다음의 0번부터 3번 항목까지 순서대로 모두 포함하여 보고서를 작성하십시오.**
+            **다음의 항목들을 순서대로 빠짐없이 분석하십시오.**
 
             0. **[기업 기본 정보 (Company Overview)]**
                - 보고서의 **가장 첫 부분**에 다음 데이터를 사용하여 **마크다운 표**를 작성하십시오.
@@ -649,6 +654,8 @@ def step_fetch_data(ticker, mode):
                - (1) **보수적 투자자 (Stable)**: 리스크 최소화 선호, 원금 보존 중시.
                - (2) **중립적 투자자 (Balanced)**: 성장과 안정의 균형, 시장 평균 수익률 추구.
                - (3) **공격적 투자자 (Aggressive)**: 높은 변동성 감내, 고수익(Alpha) 추구.
+            
+            {scenario_block}
 
             [출력 형식]
             - 보고서는 가독성 있게 마크다운 형식으로 작성하십시오.
