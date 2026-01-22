@@ -133,7 +133,8 @@ def add_ticker_logic():
                 try: 
                     add_log(f"🔍 [ADD] {ticker} 정보 조회 중 (yfinance)...")
                     t_info = yf.Ticker(ticker).info
-                    name = t_info.get('shortName') or t_info.get('longName') or ticker
+                    # 이름 가져오기: longName 우선 (Morgan Stanley 등 구분을 위해)
+                    name = t_info.get('longName') or t_info.get('shortName') or ticker
                     add_log(f"   -> 이름 식별 성공: {name}")
                 except Exception as e: 
                     name = ticker
@@ -209,7 +210,7 @@ def get_stock_name(ticker):
             
     try:
         info = run_with_timeout(_fetch_info, args=(ticker,), timeout=5)
-        if info: return info.get('shortName') or info.get('longName') or ticker
+        if info: return info.get('longName') or info.get('shortName') or ticker
         return ticker
     except: return ticker
 
@@ -249,192 +250,52 @@ def fetch_rss_realtime(url, limit=10):
         return []
 
 def get_realtime_news(ticker, name):
-    """
-    [강력 보정 버전]
-    1. 헷갈리는 티커(MS, T, O 등)는 강제로 정식 명칭 지정
-    2. Google 검색 시 intitle: 명령어로 제목 포함 강제
-    3. 제외 키워드 발견 시 즉시 폐기
-    """
-    
-    # 1. [강제 보정] 혼동하기 쉬운 티커 명시적 지정 (딕셔너리)
-    # yfinance를 믿지 않고, 우리가 직접 지정합니다.
-    explicit_names = {
-        'MS': 'Morgan Stanley',          # Microsoft 아님
-        'T': 'AT&T',                     # 단순히 T 문자가 아님
-        'O': 'Realty Income',            # 단순히 O 문자가 아님
-        'C': 'Citigroup',                # 단순히 C 문자가 아님
-        'F': 'Ford Motor',               # 단순히 F 문자가 아님
-        'V': 'Visa',                     # 단순히 V 문자가 아님
-        'M': 'Macy\'s',                  # 단순히 M 문자가 아님
-        'K': 'Kellanova',                # Kellogg
-        'Z': 'Zillow Group',
-        'GM': 'General Motors',
-    }
-    
-    # 제외해야 할 키워드 (Negative Filtering)
-    exclude_keywords = {
-        'MS': ['microsoft', 'windows', 'azure', 'xbox', 'office 365', 'bill gates', 'satya nadella', 'copilot'],
-        'T': [],
-        'O': [],
-        'C': [],
-        'F': [],
-        'V': [],
-    }
-
-    # 티커가 예외 목록에 있으면 그 이름을 우선 사용
-    clean_ticker = ticker.split('.')[0].upper() # .KS 등 제거
-    if clean_ticker in explicit_names:
-        search_name = explicit_names[clean_ticker]
-        add_log(f"🚨 [NEWS] '{ticker}'는 혼동 티커입니다. 검색어를 '{search_name}'로 강제 고정합니다.")
-    else:
-        # 그 외에는 전달받은 이름 사용하되, 너무 짧으면 풀네임 사용 유도
-        search_name = name
-
-    add_log(f"📰 [NEWS] 최종 검색 대상: {search_name} (Ticker: {ticker})")
-    
+    add_log(f"📰 [NEWS] 뉴스 검색 시작: {ticker} ({name})")
     news_items = []
     is_kr = bool(re.search(r'\.KS|\.KQ|[0-9]{6}', ticker))
-
-    # 관련성 및 제외 키워드 체크 함수
-    def validate_news(title, summary, target_name, target_ticker):
-        text = (f"{title} {summary}").lower()
-        
-        # 1. 제외 키워드 체크 (가장 중요)
-        if clean_ticker in exclude_keywords:
-            for bad_word in exclude_keywords[clean_ticker]:
-                if bad_word in text:
-                    add_log(f"      🗑️ [필터] 제외 키워드 '{bad_word}' 발견 -> 삭제")
-                    return False
-        
-        # 2. 관련성 체크 (제목이나 요약에 기업명이 있는가?)
-        # 기업명 소문자로 변환 후 핵심 단어만 추출 (Inc, Corp 제거)
-        core_name = target_name.lower().replace(' inc.', '').replace(' corp.', '').replace(' group', '').strip()
-        
-        # 이름이 텍스트에 포함되어 있거나, 티커가 명확히 포함되어 있는지
-        if core_name in text:
-            return True
-        if re.search(rf'\b{re.escape(clean_ticker)}\b', title): # 제목에 티커가 단독으로 있는지 (예: $MS)
-            return True
-            
-        return False
-
-    # 1. Yahoo Finance RSS (미국 주식 우선)
+    
     if not is_kr:
         try:
+            add_log(f"   Trying Yahoo Finance RSS for {ticker}...")
             rss_url = f"https://finance.yahoo.com/rss/headline?s={ticker}"
-            yahoo_items = fetch_rss_realtime(rss_url, limit=10)
-            
-            valid_items = []
-            for item in yahoo_items:
-                if validate_news(item['title'], item.get('summary', ''), search_name, ticker):
+            yahoo_rss_items = fetch_rss_realtime(rss_url, limit=7)
+            if yahoo_rss_items:
+                add_log(f"   -> Yahoo RSS에서 {len(yahoo_rss_items)}건 발견")
+                for item in yahoo_rss_items:
                     item['source'] = "Yahoo Finance"
-                    valid_items.append(item)
-            
-            if valid_items:
-                add_log(f"   -> Yahoo RSS에서 유효 뉴스 {len(valid_items)}건 확보")
-                return valid_items[:7]
+                    news_items.append(item)
+                return news_items
         except Exception as e:
-            add_log(f"   ⚠️ Yahoo RSS Error: {e}")
+            add_log(f"   ⚠️ Yahoo RSS Fail: {e}")
 
-    # 2. Google News RSS (검색어 정밀화)
-    try:
-        if is_kr:
-            # 한국 주식은 기업명 그대로
-            q = f'"{search_name}"'
-        else:
-            # [핵심] intitle: 명령어 사용 (제목에 기업명이 무조건 들어가야 함)
-            # 예: intitle:"Morgan Stanley" -Microsoft
-            q = f'intitle:"{search_name}"'
-            
-            # 제외 키워드가 있다면 구글 검색어 자체에서 배제
-            if clean_ticker in exclude_keywords:
-                for bad_word in exclude_keywords[clean_ticker][:2]: # 상위 2개만 쿼리에 추가
-                    q += f' -{bad_word}'
-        
-        add_log(f"   🔍 Google 검색 쿼리: {q}")
-        q_encoded = urllib.parse.quote(q)
-        url = f"https://news.google.com/rss/search?q={q_encoded}&hl=ko&gl=KR&ceid=KR:ko"
-        
-        google_items = fetch_rss_realtime(url, limit=10)
-        
-        valid_google = []
-        for n in google_items:
-            # 2차 검증 (API가 필터링 못했을 수 있으므로)
-            if validate_news(n['title'], n.get('summary', ''), search_name, ticker):
-                n['source'] = "Google News"
-                valid_google.append(n)
-        
-        add_log(f"   -> Google News 유효 뉴스 {len(valid_google)}건 확보")
-        
-        if valid_google:
-            return valid_google[:7]
-            
-    except Exception as e:
-        add_log(f"   ⚠️ Google News Error: {e}")
+    if not is_kr and not news_items:
+        try:
+            add_log(f"   Trying yfinance library for {ticker}...")
+            yf_obj = yf.Ticker(ticker)
+            yf_news = yf_obj.news
+            if yf_news:
+                add_log(f"   -> yfinance에서 {len(yf_news)}건 발견")
+                for item in yf_news:
+                    title = item.get('title'); link = item.get('link')
+                    summary = item.get('summary', '') 
+                    if not title or not link: continue
+                    pub_time = item.get('providerPublishTime', 0)
+                    try: date_str = datetime.datetime.fromtimestamp(pub_time).strftime("%m-%d %H:%M")
+                    except: date_str = "최신"
+                    news_items.append({'title': title, 'link': link, 'date_str': date_str, 'source': "Yahoo Finance", 'summary': summary})
+                if news_items: return news_items[:7]
+        except Exception as e:
+            add_log(f"   ⚠️ yfinance Fail: {e}")
 
-    return news_items
-
-def get_company_info(ticker):
-    """기업 기본 정보 (이름, 섹터, 산업) 조회"""
-    add_log(f"🏢 [INFO] 기업 정보 조회: {ticker}")
-    info = run_with_timeout(_fetch_info, args=(ticker,), timeout=8)
-    if not info: 
-        add_log("   ❌ [INFO] 기업 정보 가져오기 실패")
-        return {
-            'name': ticker,
-            'long_name': ticker,
-            'sector': '정보 없음',
-            'industry': '정보 없음',
-            'country': '정보 없음',
-            'website': '정보 없음',
-            'market_cap': 'N/A',
-            'employees': 'N/A'
-        }
-    try:
-        def safe_get(key, default='정보 없음'):
-            val = info.get(key)
-            return val if val else default
-        
-        market_cap = info.get('marketCap')
-        if market_cap:
-            if market_cap >= 1e12:
-                market_cap_str = f"${market_cap/1e12:.2f}T"
-            elif market_cap >= 1e9:
-                market_cap_str = f"${market_cap/1e9:.2f}B"
-            elif market_cap >= 1e6:
-                market_cap_str = f"${market_cap/1e6:.2f}M"
-            else:
-                market_cap_str = f"${market_cap:,.0f}"
-        else:
-            market_cap_str = "N/A"
-        
-        employees = info.get('fullTimeEmployees')
-        employees_str = f"{employees:,}명" if employees else "N/A"
-        
-        company_info = {
-            'name': safe_get('shortName', ticker),
-            'long_name': safe_get('longName', ticker),
-            'sector': safe_get('sector'),
-            'industry': safe_get('industry'),
-            'country': safe_get('country'),
-            'website': safe_get('website'),
-            'market_cap': market_cap_str,
-            'employees': employees_str
-        }
-        add_log(f"   ✅ [INFO] 기업 정보 확보: {company_info['name']} | {company_info['sector']} | {company_info['industry']}")
-        return company_info
-    except Exception as e:
-        add_log(f"   ⚠️ [INFO] 데이터 파싱 에러: {e}")
-        return {
-            'name': ticker,
-            'long_name': ticker,
-            'sector': '정보 없음',
-            'industry': '정보 없음',
-            'country': '정보 없음',
-            'website': '정보 없음',
-            'market_cap': 'N/A',
-            'employees': 'N/A'
-        }
+    # 구글 뉴스 검색 시 기업명 우선 사용 (MS 같은 티커 혼동 방지)
+    search_query = f'"{name}"' 
+    
+    add_log(f"   Trying Google News RSS with query: {search_query}")
+    q_encoded = urllib.parse.quote(search_query)
+    url = f"https://news.google.com/rss/search?q={q_encoded}&hl=ko&gl=KR&ceid=KR:ko"
+    google_news = fetch_rss_realtime(url, limit=7)
+    for n in google_news: n['source'] = "Google News"
+    return google_news
 
 def get_financial_metrics(ticker):
     add_log(f"📊 [FIN] 재무 지표 조회: {ticker}")
@@ -443,52 +304,21 @@ def get_financial_metrics(ticker):
         add_log("   ❌ [FIN] 정보 가져오기 실패 (Timeout/Empty)")
         return {}
     try:
-        def get_fmt(key): 
-            val = info.get(key)
-            return f"{val:,.2f}" if isinstance(val, (int, float)) else "N/A"
-        
-        def get_pct(key):
-            val = info.get(key)
-            if isinstance(val, (int, float)):
-                return f"{val*100:.2f}%"
-            return "N/A"
-        
+        def get_fmt(key): val = info.get(key); return f"{val:,.2f}" if isinstance(val, (int, float)) else "N/A"
         metrics = {
-            "Free Cash Flow": get_fmt('freeCashflow'), 
-            "Current Ratio": get_fmt('currentRatio'),
-            "Quick Ratio": get_fmt('quickRatio'), 
-            "Debt to Equity": get_fmt('debtToEquity'),
-            "Return on Equity (ROE)": get_pct('returnOnEquity'), 
-            "Total Revenue": get_fmt('totalRevenue'),
-            "Net Income": get_fmt('netIncome'),
-            "Revenue Growth": get_pct('revenueGrowth'),
-            "EPS (TTM)": get_fmt('trailingEps'),
-            "Forward EPS": get_fmt('forwardEps'),
-            "Profit Margin": get_pct('profitMargins'),
-            "Operating Margin": get_pct('operatingMargins'),
-            "Gross Margin": get_pct('grossMargins'),
-            "Dividend Yield": get_pct('dividendYield'),
-            "Payout Ratio": get_pct('payoutRatio'),
-            "Beta": get_fmt('beta'),
-            "PE Ratio (TTM)": get_fmt('trailingPE'),
-            "Forward PE": get_fmt('forwardPE'),
-            "PEG Ratio": get_fmt('pegRatio'),
-            "Price to Book": get_fmt('priceToBook'),
-            "Price to Sales": get_fmt('priceToSalesTrailing12Months'),
-            "52주 최고가": get_fmt('fiftyTwoWeekHigh'),
-            "52주 최저가": get_fmt('fiftyTwoWeekLow'),
-            "50일 이평선": get_fmt('fiftyDayAverage'),
-            "200일 이평선": get_fmt('twoHundredDayAverage'),
+            "Free Cash Flow": get_fmt('freeCashflow'), "Current Ratio": get_fmt('currentRatio'),
+            "Quick Ratio": get_fmt('quickRatio'), "Debt to Equity": get_fmt('debtToEquity'),
+            "Return on Equity (ROE)": get_fmt('returnOnEquity'), "Total Revenue": get_fmt('totalRevenue'),
+            "Net Income": get_fmt('netIncome')
         }
-        add_log(f"   ✅ [FIN] 재무 지표 확보 완료")
+        add_log(f"   ✅ [FIN] 재무 지표 확보 완료: {metrics}")
         return metrics
     except Exception as e: 
         add_log(f"   ⚠️ [FIN] 데이터 파싱 에러: {e}")
         return {}
 
 def sanitize_text(text):
-    text = text.replace('$', '\$')
-    text = re.sub(r'\n\s*\n+', '\n\n', text).strip()
+    text = text.replace('$', '\$'); text = re.sub(r'\n\s*\n+', '\n\n', text).strip()
     return text
 
 def collapse_sidebar():
@@ -544,76 +374,69 @@ def step_fetch_data(ticker, mode):
     add_log(f"==========================================")
     add_log(f"📦 [STEP 1] 데이터 수집 시작: {ticker} ({mode})")
     
+    stock_name = ticker 
     clean_code = re.sub(r'[^0-9]', '', ticker)
     is_kr = (".KS" in ticker or ".KQ" in ticker or (ticker.isdigit() and len(ticker)==6))
     tv_symbol = f"KRX:{clean_code}" if is_kr else ticker
 
     try:
-        # 1. 기업 정보 가져오기
-        company_info = get_company_info(ticker)
-        
-        # 2. 이름 결정 로직
-        # API에서 가져온 긴 이름(Morgan Stanley)을 우선 사용
-        stock_name = company_info.get('long_name') or company_info.get('name') or ticker
-        
-        # 포트폴리오에 저장된 이름이 더 길고 정확하다면 그것을 사용 (옵션)
-        if 'portfolio_df' in st.session_state:
-            p_df = st.session_state['portfolio_df']
-            row = p_df[p_df['ticker'] == ticker]
-            if not row.empty:
-                saved_name = row.iloc[0]['name']
-                # 저장된 이름이 티커명과 다르고, 현재 파악된 이름보다 길다면 채택
-                if saved_name and saved_name != ticker and len(saved_name) > len(stock_name):
-                    stock_name = saved_name
-        
-        add_log(f"   ℹ️ 식별된 기업명: {stock_name}")
-
-        # 주가 데이터 가져오기
+        # [핵심] 기업명 식별 강화 로직
+        # yfinance info를 통해 'longName'을 우선적으로 가져와서 MS -> Morgan Stanley 구분을 확실히 함
+        try:
+            t = yf.Ticker(ticker)
+            info = t.info
+            stock_name = info.get('longName') or info.get('shortName') or ticker
+            add_log(f"   ℹ️ 식별된 기업명: {stock_name}")
+        except:
+            add_log(f"   ⚠️ 기업명 식별 실패, 티커({ticker}) 사용")
+            stock_name = ticker
+            
         period = st.session_state.get('selected_period_str', '1y')
+        add_log(f"   - 주가 데이터 요청 (기간: {period})")
         df = run_with_timeout(_fetch_history, args=(ticker, period), timeout=10)
         
-        if df is None: df = pd.DataFrame()
-        
-        # 데이터 요약 생성
+        if df is None: 
+            df = pd.DataFrame()
+            add_log("   ⚠️ 주가 데이터 타임아웃/실패")
+        else:
+            add_log(f"   ✅ 주가 데이터 수신: {len(df)} rows")
+
         data_summary = "No Data"
         if not df.empty:
             curr = df['Close'].iloc[-1]; high_val = df['High'].max(); low_val = df['Low'].min()
-            display_df = df.tail(60); recent_days = df.tail(5)
-            data_summary = f"[Stats] High: {high_val:.2f}, Low: {low_val:.2f}, Current: {curr:.2f}\n[Recent]\n{recent_days.to_string()}"
+            stats_str = f"High: {high_val:.2f}, Low: {low_val:.2f}, Current: {curr:.2f}"
+            # [수정] 차트 정보량을 늘리기 위해 tail(180)으로 확대 (약 6개월)
+            display_df = df.tail(180) 
+            recent_days = df.tail(5)
+            data_summary = f"[Stats] {stats_str}\n[Trend (Last 180 Days)]\n{display_df.to_string()}\n[Recent 5 Days]\n{recent_days.to_string()}"
         else: curr = 0
 
         fin_str = "N/A"; news_text = "N/A"
         
         if mode not in ["10K", "10Q", "8K"]:
-            # 재무 지표
             try: 
-                fm = get_financial_metrics(ticker)
-                fin_str = str(fm) if fm else "N/A"
+                fm = get_financial_metrics(ticker); fin_str = str(fm) if fm else "N/A"
             except: pass
             
-            # 뉴스 가져오기 (수정된 강력 필터링 함수 호출)
             if st.session_state.get('use_news', True):
                 try:
-                    # 여기서 식별된 stock_name을 넘기지만, 
-                    # get_realtime_news 내부에서 MS 같은 예외는 강제로 Morgan Stanley로 바꿉니다.
                     news = get_realtime_news(ticker, stock_name)
-                    
                     if news: 
                         formatted_news = []
                         for n in news:
                             title = n['title']
                             summary = n.get('summary', '')
-                            # 내용이 제목과 너무 같으면 요약 생략
                             if is_similar(title, summary): summary = ""
                             elif len(summary) > 200: summary = summary[:200] + "..."
-                            
                             item_str = f"- [{n.get('source', 'News')}] {title} ({n['date_str']})"
-                            if summary: item_str += f"\n  > 요약: {summary}"
+                            if summary: item_str += f"\n  > 내용요약: {summary}"
                             formatted_news.append(item_str)
                         news_text = "\n".join(formatted_news)
-                    else: news_text = "관련된 최신 뉴스가 없습니다 (필터링됨)."
+                        add_log(f"   ✅ 뉴스 텍스트 생성 완료 ({len(news)}건)")
+                    else: news_text = "관련된 최신 뉴스가 없습니다."
                 except Exception as e: 
-                    news_text = f"뉴스 처리 실패: {str(e)}"
+                    news_text = f"뉴스 가져오기 실패: {str(e)}"
+                    add_log(f"   ❌ 뉴스 처리 중 치명적 오류: {e}")
 
         selected_focus_list = []
         for opt in opt_targets:
@@ -622,741 +445,148 @@ def step_fetch_data(ticker, mode):
         viewpoint = st.session_state.get('selected_viewpoint', 'General')
         analysis_depth = st.session_state.get('analysis_depth', "2. 표준 브리핑 (Standard)")
         
-        # =====================================================
-        # 시나리오 모드 설정
-        # =====================================================
         level_instruction = ""
-        scenario_section = ""
-        
         if "5." in analysis_depth:
-            level_instruction = """
-⚠️ **[시나리오 분석 모드 활성화]**
-이 분석은 '시나리오 모드'입니다. 아래 시나리오 분석 섹션을 **반드시 상세하게 작성**하십시오.
-절대로 생략하지 마십시오.
-"""
-            scenario_section = """
----
-## 🎭 시나리오 분석 (SCENARIO ANALYSIS) - 필수 작성
-
-⚠️ **이 섹션은 시나리오 모드의 핵심입니다. 반드시 3가지 시나리오를 모두 상세히 작성하십시오.**
-
-### 📈 시나리오 1: 낙관적 시나리오 (Bull Case)
-**발생 확률**: [구체적인 %를 제시하시오, 예: 25%]
-
-**시나리오 전제 조건** (이 시나리오가 실현되려면):
-1. [첫 번째 필요 조건 - 구체적으로]
-2. [두 번째 필요 조건 - 구체적으로]
-3. [세 번째 필요 조건 - 구체적으로]
-
-**예상 주가 흐름**:
-- 목표 주가: [구체적인 금액]
-- 현재가 대비 상승률: [%]
-- 예상 도달 시점: [기간]
-
-**이 시나리오를 지지하는 근거**:
-1. [근거 1 - 데이터/사실 기반]
-2. [근거 2 - 데이터/사실 기반]
-3. [근거 3 - 데이터/사실 기반]
-
----
-
-### ➡️ 시나리오 2: 기본 시나리오 (Base Case)
-**발생 확률**: [구체적인 %를 제시하시오, 예: 50%]
-
-**시나리오 전제 조건** (현재 상황이 유지된다면):
-1. [첫 번째 전제 - 구체적으로]
-2. [두 번째 전제 - 구체적으로]
-3. [세 번째 전제 - 구체적으로]
-
-**예상 주가 흐름**:
-- 목표 주가 범위: [구체적인 금액 범위]
-- 현재가 대비 등락률: [%]
-- 예상 횡보/변동 기간: [기간]
-
-**이 시나리오가 가장 가능성 높은 이유**:
-1. [이유 1 - 논리적 설명]
-2. [이유 2 - 논리적 설명]
-3. [이유 3 - 논리적 설명]
-
----
-
-### 📉 시나리오 3: 비관적 시나리오 (Bear Case)
-**발생 확률**: [구체적인 %를 제시하시오, 예: 25%]
-
-**시나리오 전제 조건** (이 시나리오가 실현되려면):
-1. [첫 번째 위험 요소 - 구체적으로]
-2. [두 번째 위험 요소 - 구체적으로]
-3. [세 번째 위험 요소 - 구체적으로]
-
-**예상 주가 흐름**:
-- 하방 목표가: [구체적인 금액]
-- 현재가 대비 하락률: [%]
-- 손절 권장 가격: [구체적인 금액]
-
-**이 시나리오의 위험 신호 (모니터링 포인트)**:
-1. [위험 신호 1 - 구체적인 지표/이벤트]
-2. [위험 신호 2 - 구체적인 지표/이벤트]
-3. [위험 신호 3 - 구체적인 지표/이벤트]
-
----
-
-### 🎯 시나리오별 대응 전략 요약
-
-**낙관적 시나리오 (Bull)**: 확률 [X]%, 목표가 [금액], 핵심 트리거는 [트리거], 권장 액션은 [매수/홀드/추가매수]
-
-**기본 시나리오 (Base)**: 확률 [X]%, 목표가 [금액], 핵심 트리거는 [트리거], 권장 액션은 [홀드/부분매도]
-
-**비관적 시나리오 (Bear)**: 확률 [X]%, 목표가 [금액], 핵심 트리거는 [트리거], 권장 액션은 [손절/비중축소]
-
-**⚠️ 확률 합계 검증**: 세 시나리오의 확률 합이 100%가 되도록 조정하십시오.
-"""
-        
-        # =====================================================
-        # 상세 지시사항 생성 함수
-        # =====================================================
-        def build_detailed_analysis_instructions(focus_list):
-            """선택된 분석 항목에 대한 상세 지시사항 생성"""
-            instructions = []
-            
-            if "현금건전성 지표 (FCF, 유동비율, 부채비율)" in focus_list:
-                instructions.append("""
----
-### 📊 현금건전성 지표 분석 (반드시 작성 - 생략 금지)
-**⚠️ 이 섹션을 반드시 작성하십시오. 생략 시 분석 품질이 크게 저하됩니다.**
-
-- **Free Cash Flow (FCF)**: 
-  - 현재 값: [구체적 금액]
-  - 전년 대비 증감률: [%]
-  - FCF 마진율: [%]
-  - 해석: [양호/주의/위험]
-
-- **유동비율 (Current Ratio)**: 
-  - 현재 값: [숫자]
-  - 업종 평균 대비: [상회/하회/유사]
-  - 해석: [단기 지급능력 평가]
-
-- **부채비율 (Debt to Equity)**: 
-  - 현재 값: [%]
-  - 추세: [증가/감소/안정]
-  - 해석: [재무 건전성 평가]
-
-- **Quick Ratio**: 
-  - 현재 값: [숫자]
-  - 해석: [즉시 지급능력 평가]
-
-**💡 현금건전성 종합 의견**: [양호/보통/주의 필요 중 하나 선택 및 근거 설명]""")
-            
-            if "핵심 재무제표 분석 (손익, 대차대조, 현금흐름)" in focus_list:
-                instructions.append("""
----
-### 📈 핵심 재무제표 분석 (반드시 작성 - 생략 금지)
-**⚠️ 이 섹션을 반드시 작성하십시오.**
-
-**1. 손익계산서 분석**
-- **매출액**: 최근 실적 [금액], YoY 성장률 [%], 평가 [양호/보통/부진]
-- **영업이익**: 최근 실적 [금액], YoY 성장률 [%], 평가 [양호/보통/부진]
-- **순이익**: 최근 실적 [금액], YoY 성장률 [%], 평가 [양호/보통/부진]
-- **영업이익률 변화**: 전년 [%] → 금년 [%] ([개선/악화])
-- **순이익률 변화**: 전년 [%] → 금년 [%] ([개선/악화])
-- **비용 구조 특이사항**: [있다면 기술]
-
-**2. 대차대조표 분석**
-- **자산 총계**: [금액] (전년 대비 [%] 변화)
-- **부채 총계**: [금액] (부채 비율 [%])
-- **자기자본**: [금액] (ROE [%])
-
-**3. 현금흐름표 분석**
-- **영업활동 현금흐름**: [금액], 전년 대비 [증가/감소], 해석: [플러스면 양호, 마이너스면 주의]
-- **투자활동 현금흐름**: [금액], 전년 대비 [증가/감소], 해석: [CAPEX 투자 현황]
-- **재무활동 현금흐름**: [금액], 전년 대비 [증가/감소], 해석: [배당/자사주/차입 상황]
-
-**💡 재무제표 종합 평가**: [건전/보통/취약 중 선택 및 근거]""")
-            
-            if "투자기관 목표주가 및 컨센서스" in focus_list:
-                instructions.append("""
----
-### 🎯 투자기관 목표주가 및 컨센서스 (반드시 작성 - 생략 금지)
-**⚠️ 이 섹션을 반드시 작성하십시오. 데이터가 부족하면 '정보 제한적'이라고 명시하되, 가용한 정보는 모두 제공하십시오.**
-
-**목표주가 분석**
-- **최저 목표가**: [금액] (현재가 대비 [%])
-- **평균 목표가**: [금액] (현재가 대비 [%])
-- **최고 목표가**: [금액] (현재가 대비 [%])
-
-**투자의견 분포**
-- 강력 매수: [개] ([%])
-- 매수: [개] ([%])
-- 보유: [개] ([%])
-- 매도: [개] ([%])
-
-**최근 컨센서스 변화**
-- 추세: [상향 조정 / 하향 조정 / 유지]
-- 주요 변경 사유: [있다면 기술]
-
-**주요 증권사 최근 의견** (2-3개)
-1. [증권사명]: [의견] / 목표가 [금액] / [핵심 논거]
-2. [증권사명]: [의견] / 목표가 [금액] / [핵심 논거]
-
-**💡 컨센서스 종합 평가**: [긍정적/중립/부정적 중 선택 및 근거]""")
-            
-            if "호재/악재 뉴스 판단" in focus_list:
-                instructions.append("""
----
-### 📰 호재/악재 뉴스 판단 (반드시 작성 - 생략 금지)
-**⚠️ 이 섹션을 반드시 작성하십시오.**
-
-**[호재 뉴스 🟢]** 1. **[뉴스 제목 1]**: 영향도 [상/중/하], 주가 영향 분석 - [구체적 영향 설명]
-2. **[뉴스 제목 2]**: 영향도 [상/중/하], 주가 영향 분석 - [구체적 영향 설명]
-
-**[악재 뉴스 🔴]**
-1. **[뉴스 제목 1]**: 리스크 수준 [높음/중간/낮음], 대응 전략 - [대응 방안]
-2. **[뉴스 제목 2]**: 리스크 수준 [높음/중간/낮음], 대응 전략 - [대응 방안]
-
-**[중립 뉴스 ⚪]** (있다면)
-- [뉴스 제목 및 해석]
-
-**💡 뉴스 환경 종합 판단**: 
-- 현재 뉴스 톤: [긍정적 / 부정적 / 혼재]
-- 투자 시사점: [매수 기회 / 리스크 관리 필요 / 관망]""")
-            
-            if "기술적 지표 (RSI/이평선)" in focus_list:
-                instructions.append("""
----
-### 📉 기술적 지표 분석 (반드시 작성 - 생략 금지)
-**⚠️ 이 섹션을 반드시 작성하십시오.**
-
-**1. RSI (14일 기준)**
-- 현재 RSI 값: [숫자]
-- 해석: [과매수(>70) / 과매도(<30) / 중립]
-- 최근 추세: [상승 / 하락 / 횡보]
-- 다이버전스: [발생 여부 및 의미]
-
-**2. 이동평균선 분석**
-- **5일선**: 현재가 [가격], 괴리율 [%], [지지선/저항선/돌파] 역할
-- **20일선**: 현재가 [가격], 괴리율 [%], [지지선/저항선/돌파] 역할
-- **60일선**: 현재가 [가격], 괴리율 [%], [지지선/저항선/돌파] 역할
-- **120일선**: 현재가 [가격], 괴리율 [%], [지지선/저항선/돌파] 역할
-- **골든크로스/데드크로스**: [발생 여부 및 시점]
-- **배열 상태**: [정배열/역배열]
-
-**3. 추가 기술적 지표**
-- MACD: [현재 상태 및 신호]
-- 볼린저 밴드: [상단/중단/하단 위치]
-- 거래량 추세: [증가/감소/평균 대비]
-
-**💡 기술적 분석 결론**:
-- 단기 방향성: [상승 / 하락 / 횡보]
-- 매수 적정가: [가격대]
-- 손절가: [가격]""")
-            
-            if "외국인/기관 수급 분석" in focus_list:
-                instructions.append("""
----
-### 🏦 외국인/기관 수급 분석 (반드시 작성 - 생략 금지)
-**⚠️ 이 섹션을 반드시 작성하십시오.**
-
-**1. 외국인 동향**
-- **최근 5일**: [순매수/순매도], 금액 [금액], 지분율 변화 [%p]
-- **최근 20일**: [순매수/순매도], 금액 [금액], 지분율 변화 [%p]
-- **최근 60일**: [순매수/순매도], 금액 [금액], 지분율 변화 [%p]
-- **현재 외국인 지분율**: [%]
-- **추세 해석**: [매집 / 이탈 / 중립]
-
-**2. 기관 동향**
-- **투신**: 최근 5일 [금액], 최근 20일 [금액], 해석 [매집/이탈]
-- **연기금**: 최근 5일 [금액], 최근 20일 [금액], 해석 [매집/이탈]
-- **보험**: 최근 5일 [금액], 최근 20일 [금액], 해석 [매집/이탈]
-
-**3. 수급 종합 판단**
-- 수급 모멘텀: [긍정적 / 부정적 / 중립]
-- 스마트머니 흐름: [유입 / 이탈 / 대기]
-- 수급 기반 단기 전망: [상승 / 하락 / 횡보]""")
-            
-            if "경쟁사 비교 및 업황" in focus_list:
-                instructions.append("""
----
-### 🏭 경쟁사 비교 및 업황 분석 (반드시 작성 - 생략 금지)
-**⚠️ 이 섹션을 반드시 작성하십시오.**
-
-**1. 업종 현황**
-- 산업 사이클 위치: [도입기 / 성장기 / 성숙기 / 쇠퇴기]
-- 업종 전망: [긍정적 / 중립 / 부정적]
-- 주요 트렌드: [2-3가지 핵심 트렌드]
-- 규제 환경: [우호적 / 중립 / 부정적]
-
-**2. 주요 경쟁사 비교**
-- **해당 기업**: 시가총액 [금액], PER [배수], PBR [배수], 매출 성장률 [%], 영업이익률 [%], ROE [%]
-- **경쟁사 A ([기업명])**: 시가총액 [금액], PER [배수], PBR [배수], 매출 성장률 [%], 영업이익률 [%], ROE [%]
-- **경쟁사 B ([기업명])**: 시가총액 [금액], PER [배수], PBR [배수], 매출 성장률 [%], 영업이익률 [%], ROE [%]
-- **업종 평균**: PER [배수], PBR [배수], 매출 성장률 [%], 영업이익률 [%], ROE [%]
-
-**3. 경쟁 우위 분석**
-- **강점 (Strengths)**: [2-3가지]
-- **약점 (Weaknesses)**: [2-3가지]
-- **기회 (Opportunities)**: [2-3가지]
-- **위협 (Threats)**: [2-3가지]
-
-**💡 경쟁력 종합 평가**: [업종 내 상위 / 중위 / 하위 및 근거]""")
-            
-            if "단기/중기 매매 전략" in focus_list:
-                instructions.append("""
----
-### 💰 단기/중기 매매 전략 (반드시 작성 - 생략 금지)
-**⚠️ 이 섹션을 반드시 작성하십시오.**
-
-**[단기 전략 (1주~1개월)]**
-- **추천 포지션**: [매수/매도/관망], 근거: [근거 설명]
-- **1차 진입가**: [가격], 근거: [지지선 기반]
-- **2차 진입가**: [가격], 근거: [강한 지지선]
-- **1차 목표가**: [가격], 근거: [저항선 기반]
-- **2차 목표가**: [가격], 근거: [강한 저항선]
-- **손절가**: [가격], 근거: [근거]
-
-**[중기 전략 (1~6개월)]**
-- **추천 포지션**: [매수/홀드/매도], 근거: [근거 설명]
-- **분할 매수 전략**: 1차 [%], 2차 [%], 3차 [%], 근거: [근거]
-- **목표 수익률**: [%], 근거: [근거]
-- **포트폴리오 권장 비중**: [%], 근거: [투자 성향 고려]
-
-**[리스크 관리]**
-- 손절 기준: [조건 명시]
-- 익절 기준: [조건 명시]
-- 모니터링 포인트: [3가지]
-- 포지션 조정 트리거: [구체적 조건]""")
-            
-            if "투자성향별 포트폴리오 적정보유비중" in focus_list:
-                instructions.append("""
----
-## 🎯 투자성향별 포트폴리오 적정보유비중 (필수 - 절대 생략 금지)
-
-**⚠️⚠️⚠️ 이 섹션은 매우 중요합니다. 반드시 모든 항목을 상세히 작성하십시오. ⚠️⚠️⚠️**
-
----
-
-### 📌 STEP 1: 성장주 vs 가치주 판단
-
-**이 종목의 분류**: [성장주 / 가치주 / 혼합형] 중 하나 선택
-
-**판단 근거** (각 기준별로 평가):
-- **PER**: 해당 종목 [숫자]배 → 성장주 특성(>20배) vs 가치주 특성(<15배) → **[성장/가치] 판정**
-- **PBR**: 해당 종목 [숫자]배 → 성장주 특성(>3배) vs 가치주 특성(<1.5배) → **[성장/가치] 판정**
-- **매출성장률**: 해당 종목 [%] → 성장주 특성(>15%) vs 가치주 특성(<5%) → **[성장/가치] 판정**
-- **배당수익률**: 해당 종목 [%] → 성장주 특성(<1%) vs 가치주 특성(>3%) → **[성장/가치] 판정**
-- **이익재투자 성향**: [설명] → 성장주 특성(높음) vs 가치주 특성(낮음) → **[성장/가치] 판정**
-
-**최종 판정**: 이 종목은 **[성장주/가치주]**입니다.
-
----
-
-### 📌 STEP 2: 성장주/가치주별 핵심 지표 심층 분석
-
-#### 🌱 [성장주로 판단된 경우 - 아래 5가지를 반드시 모두 분석]
-
-**1️⃣ 매출 성장률 분석 (CAGR)**
-- 5년 전 매출액: [금액] (기준점)
-- 4년 전 매출액: [금액], YoY 성장률 [%]
-- 3년 전 매출액: [금액], YoY 성장률 [%]
-- 2년 전 매출액: [금액], YoY 성장률 [%]
-- 1년 전 매출액: [금액], YoY 성장률 [%]
-- 최근 매출액: [금액], YoY 성장률 [%]
-- **5년 CAGR**: [%]
-- **성장 추세**: [가속 / 안정 / 둔화]
-- **평가**: [우수 / 양호 / 주의]
-
-**2️⃣ Cash Flow 추이 분석**
-- 3년 전: 영업CF [금액], 투자CF [금액], 잉여CF [금액], FCF마진 [%]
-- 2년 전: 영업CF [금액], 투자CF [금액], 잉여CF [금액], FCF마진 [%]
-- 최근: 영업CF [금액], 투자CF [금액], 잉여CF [금액], FCF마진 [%]
-- **현금흐름 추세**: [개선 / 안정 / 악화]
-- **현금창출력 평가**: [강함 / 보통 / 약함]
-
-**3️⃣ ROI (투자수익률) 분석**
-- **ROE**: 3년 전 [%] → 2년 전 [%] → 최근 [%], 추세 [개선/악화]
-- **ROA**: 3년 전 [%] → 2년 전 [%] → 최근 [%], 추세 [개선/악화]
-- **ROIC**: 3년 전 [%] → 2년 전 [%] → 최근 [%], 추세 [개선/악화]
-- **투자효율성 평가**: [높음 / 보통 / 낮음]
-
-**4️⃣ Profit Margin 추이**
-- 3년 전: 매출총이익률 [%], 영업이익률 [%], 순이익률 [%]
-- 2년 전: 매출총이익률 [%], 영업이익률 [%], 순이익률 [%]
-- 최근: 매출총이익률 [%], 영업이익률 [%], 순이익률 [%]
-- **수익성 전환**: [흑자전환 완료 / 흑자전환 진행중 / 적자 지속]
-- **마진 추세**: [확대 / 유지 / 축소]
-
-**5️⃣ 성장 지속성 평가**
-- **변동성 (표준편차)**: [숫자] - [낮음/보통/높음]
-- **분기별 실적 일관성**: [일관적 / 변동적]
-- **가이던스 달성률**: [%]
-- **성장 지속 가능성**: [높음 / 보통 / 낮음]
-
----
-
-#### 💎 [가치주로 판단된 경우 - 아래 5가지를 반드시 모두 분석]
-
-**1️⃣ 시장 점유율 분석**
-- 3년 전: 시장점유율 [%], 순위 [위] (기준점)
-- 2년 전: 시장점유율 [%], 변화 [+/-]%p, 순위 [위]
-- 최근: 시장점유율 [%], 변화 [+/-]%p, 순위 [위]
-- **점유율 추세**: [확대 / 유지 / 축소]
-- **⚠️ 점유율 감소 시 경고**: [배당 축소 가능성 평가]
-
-**2️⃣ 배당금 안정성 분석**
-- 5년 전: 주당배당금 [원/달러], 배당수익률 [%], 배당성향 [%]
-- 3년 전: 주당배당금 [원/달러], 배당수익률 [%], 배당성향 [%]
-- 최근: 주당배당금 [원/달러], 배당수익률 [%], 배당성향 [%]
-- **배당 연속 지급**: [X년 연속]
-- **배당 증가 추세**: [증가 / 유지 / 감소]
-- **배당 안정성 등급**: [AAA / AA / A / BBB / 주의]
-
-**3️⃣ 주가 안정성 (변동성) 분석**
-- **베타(β)**: 해당 종목 [숫자], 업종 평균 [숫자], 평가 [낮음/보통/높음]
-- **52주 변동폭**: 해당 종목 [%], 업종 평균 [%], 평가 [안정/보통/변동]
-- **최대 낙폭(MDD)**: 해당 종목 [%], 업종 평균 [%], 평가 [양호/주의]
-- **변동성 등급**: [매우 안정 / 안정 / 보통 / 변동적]
-
-**4️⃣ 이익률 변화 분석**
-- 3년 전: 영업이익률 [%], 순이익률 [%] (기준점)
-- 2년 전: 영업이익률 [%], 순이익률 [%], 변화 [개선/악화]
-- 최근: 영업이익률 [%], 순이익률 [%], 변화 [개선/악화]
-- **마진 추세**: [상승 = 경쟁력 강화 / 하락 = 경쟁력 약화]
-- **업종 대비**: [상위 / 중위 / 하위]
-
-**5️⃣ EPS 변화 분석**
-- 3년 전: EPS [원/달러] (기준점)
-- 2년 전: EPS [원/달러], YoY 변화 [%], 컨센서스 [상회/하회]
-- 최근: EPS [원/달러], YoY 변화 [%], 컨센서스 [상회/하회]
-- 예상(다음해): EPS [원/달러], YoY 변화 [%]
-- **EPS 성장 추세**: [안정 성장 / 변동 / 하락]
-- **어닝 서프라이즈 빈도**: [자주 / 가끔 / 드뭄]
-
----
-
-### 📌 STEP 3: 투자 성향별 권장 보유 비중
-
-⚠️ **아래 세 가지 투자 성향 모두에 대해 반드시 상세히 작성하십시오.**
-
----
-
-#### 🦁 1. 공격적 투자자 (Aggressive Investor)
-
-**투자자 특성**:
-- 높은 변동성 감내 가능
-- 고수익 추구형 (연 20% 이상 목표)
-- 투자 기간: 단기~중기 (6개월~2년)
-- 손실 허용 범위: -30% 이상
-
-**권장 보유 비중**: **[X]%** (전체 주식 포트폴리오 대비)
-
-**비중 산정 근거**:
-1. [첫 번째 근거 - 성장성/수익성 관점에서 구체적으로]
-2. [두 번째 근거 - 리스크/변동성 관점에서 구체적으로]  
-3. [세 번째 근거 - 업종/시장 상황 관점에서 구체적으로]
-
-**주의사항 및 리스크**:
-- ⚠️ [핵심 리스크 1]
-- ⚠️ [핵심 리스크 2]
-
-**추천 진입 전략**:
-- 진입 시점: [조건]
-- 분할 매수: [1차 X%, 2차 X%, 3차 X%]
-
----
-
-#### ⚖️ 2. 중립적 투자자 (Moderate Investor)
-
-**투자자 특성**:
-- 성장과 안정의 균형 중시
-- 적정 수익 추구형 (연 10-15% 목표)
-- 투자 기간: 중기 (1-3년)
-- 손실 허용 범위: -15% 내외
-
-**권장 보유 비중**: **[X]%** (전체 주식 포트폴리오 대비)
-
-**비중 산정 근거**:
-1. [첫 번째 근거 - 균형 잡힌 관점에서 구체적으로]
-2. [두 번째 근거 - 리스크 대비 수익 관점에서 구체적으로]
-3. [세 번째 근거 - 분산 투자 관점에서 구체적으로]
-
-**리밸런싱 제안**:
-- 비중 확대 조건: [구체적 조건 - 예: 주가 X% 하락 시]
-- 비중 축소 조건: [구체적 조건 - 예: PER X배 초과 시]
-- 리밸런싱 주기: [월간/분기/반기]
-
-**포트폴리오 내 역할**:
-- [핵심 / 위성 / 분산] 종목으로 편입 권장
-
----
-
-#### 🛡️ 3. 보수적 투자자 (Conservative Investor)
-
-**투자자 특성**:
-- 원금 보존 최우선
-- 안정적 수익 추구형 (연 5-8% + 배당)
-- 투자 기간: 장기 (3년 이상)
-- 손실 허용 범위: -10% 미만
-
-**권장 보유 비중**: **[X]%** (전체 주식 포트폴리오 대비)
-
-**비중 산정 근거**:
-1. [첫 번째 근거 - 안전성 관점에서 구체적으로]
-2. [두 번째 근거 - 배당/현금흐름 관점에서 구체적으로]
-3. [세 번째 근거 - 방어적 특성 관점에서 구체적으로]
-
-**대안 제시** (비중이 낮은 경우):
-- 대신 추천하는 자산: [구체적 대안 - 예: 배당 ETF, 채권, 우선주 등]
-- 이유: [대안이 더 적합한 이유]
-
-**안전 마진 확보 전략**:
-- 매수 적정가: [현재가 대비 X% 하락 시]
-- 필수 체크 포인트: [배당 지속성, 부채비율 등]
-
----
-
-### 📌 투자 성향별 비중 요약
-
-**🦁 공격적 투자자**: 권장 비중 **[X]%**, 핵심 근거 - [한줄 요약], 주의사항 - [핵심 리스크]
-
-**⚖️ 중립적 투자자**: 권장 비중 **[X]%**, 핵심 근거 - [한줄 요약], 주의사항 - [핵심 리스크]
-
-**🛡️ 보수적 투자자**: 권장 비중 **[X]%**, 핵심 근거 - [한줄 요약], 주의사항 - [핵심 리스크]
-
-**💡 최종 권고**: [이 종목의 전반적인 투자 매력도와 누구에게 가장 적합한지 1-2문장으로 요약]
-""")
-            
-            return "\n".join(instructions)
-        
-        # 상세 지시사항 생성
-        detailed_instructions = build_detailed_analysis_instructions(selected_focus_list)
-        
-        # =====================================================
-        # 기업 기본정보 섹션 생성
-        # =====================================================
-        display_name = stock_name if stock_name != ticker else company_info['long_name']
-
-        company_info_section = f"""
-## 🏢 기업 기본 정보 (Company Overview)
-
-- **정식 기업명**: **{display_name}**
-- **티커(심볼)**: {ticker}
-- **섹터 (Sector)**: **{company_info['sector']}**
-- **산업 (Industry)**: **{company_info['industry']}**
-- **국가**: {company_info['country']}
-- **시가총액**: {company_info['market_cap']}
-- **직원 수**: {company_info['employees']}
-
-⚠️ **확인**: 이 분석은 **{display_name}** ({ticker})에 대한 것입니다. 
-이 기업은 **{company_info['sector']}** 섹터의 **{company_info['industry']}** 산업에 속합니다.
-다른 기업과 혼동하지 마십시오.
-
----
-"""
+            level_instruction = "가장 낙관적인/비관적인 시나리오와 구체적인 미래 주가 예측(Target Price Range)을 포함하여 심층적으로 분석하십시오."
 
         add_log(f"📝 프롬프트 조립 시작 (Mode: {mode})")
         if mode == "10K":
             prompt = f"""
-[역할] 월가 수석 애널리스트 (펀더멘털 & 장기 투자 전문가)
+            [역할] 월가 수석 애널리스트 (펀더멘털 & 장기 투자 전문가)
+            [대상] {ticker} (공식 기업명: {stock_name})
+            [자료] 최신 SEC 10-K 보고서 (Annual Report)
+            
+            [지시사항]
+            당신은 월가 최고의 주식 애널리스트입니다.
+            위 종목의 **최신 SEC 10-K 보고서**를 기반으로 기업의 기초 체력과 장기 비전을 심층 분석해 주세요.
+            **주의: '{ticker}'는 '{stock_name}'입니다. 다른 기업(예: Microsoft 등)과 혼동하지 마십시오.**
+            필요하다면 Google Search 도구를 활용하여 최신 데이터를 교차 검증하세요.
+            
+            **[출력 형식]**
+            - 마크다운(Markdown) 형식을 사용하여 깔끔하게 작성하세요.
+            - 섹션 헤더, 불렛 포인트, 볼드체를 적절히 활용하세요.
 
-⚠️ **중요: 모든 응답은 반드시 한글(Korean)로 작성하십시오.**
-
-{company_info_section}
-
-[자료] 최신 SEC 10-K 보고서 (Annual Report)
-
-[지시사항]
-당신은 월가 최고의 주식 애널리스트입니다.
-위 종목의 **최신 SEC 10-K 보고서**를 기반으로 기업의 기초 체력과 장기 비전을 심층 분석해 주세요.
-**주의: '{ticker}'는 '{display_name}'입니다. 다른 기업과 혼동하지 마십시오.**
-필요하다면 Google Search 도구를 활용하여 최신 데이터를 교차 검증하세요.
-
-**[출력 형식]**
-- 마크다운(Markdown) 형식을 사용하여 깔끔하게 작성하세요.
-- 섹션 헤더, 불렛 포인트, 볼드체를 적절히 활용하세요.
-
-**[필수 분석 항목]**
-1. **비즈니스 개요 (Overview)**: 
-   - 산업 내 위치, 비즈니스 모델의 강점, Fiscal Year End 날짜.
-
-2. **MD&A 및 미래 전망 (Outlook)**: (중요)
-   - 경영진이 제시하는 내년도 시장 전망 및 전략.
-   - 매출 및 수익성 성장에 대한 경영진의 자신감 톤(Tone) 분석.
-
-3. **핵심 리스크 및 법적 이슈 (Risk & Legal)**:
-   - 사업에 치명적일 수 있는 Risk Factors.
-   - 진행 중인 중요한 소송(Legal Proceedings)이나 규제 이슈 여부.
-
-4. **재무제표 정밀 분석 (Financials)**:
-   - 대차대조표, 손익계산서, 현금흐름표의 주요 변동 사항.
-   - **부채 만기 구조(Debt Maturity)** 및 유동성 위기 가능성 점검.
-
-5. **주요 이벤트 (Key Events)**:
-   - 자사주 매입, M&A, 경영진 변동, 대규모 구조조정 등.
-
-[결론]
-기업의 장기적인 투자가치와 해자(Moat)에 대한 종합 평가.
-"""
+            **[필수 분석 항목]**
+            1. **비즈니스 개요 (Overview)**: 
+               - 산업 내 위치, 비즈니스 모델의 강점, Fiscal Year End 날짜.
+            
+            2. **MD&A 및 미래 전망 (Outlook)**: (중요)
+               - 경영진이 제시하는 내년도 시장 전망 및 전략.
+               - 매출 및 수익성 성장에 대한 경영진의 자신감 톤(Tone) 분석.
+            
+            3. **핵심 리스크 및 법적 이슈 (Risk & Legal)**:
+               - 사업에 치명적일 수 있는 Risk Factors.
+               - 진행 중인 중요한 소송(Legal Proceedings)이나 규제 이슈 여부.
+            
+            4. **재무제표 정밀 분석 (Financials)**:
+               - 대차대조표, 손익계산서, 현금흐름표의 주요 변동 사항.
+               - **부채 만기 구조(Debt Maturity)** 및 유동성 위기 가능성 점검.
+            
+            5. **주요 이벤트 (Key Events)**:
+               - 자사주 매입, M&A, 경영진 변동, 대규모 구조조정 등.
+            
+            [결론]
+            기업의 장기적인 투자가치와 해자(Moat)에 대한 종합 평가.
+            """
         elif mode == "10Q":
             prompt = f"""
-[역할] 실적 모멘텀 및 트렌드 분석가
-
-⚠️ **중요: 모든 응답은 반드시 한글(Korean)로 작성하십시오.**
-
-{company_info_section}
-
-[자료] 최신 SEC 10-Q 보고서 (Quarterly Report)
-
-[지시사항]
-위 종목의 **최신 SEC 10-Q 보고서**를 기반으로 **직전 분기 대비 변화(Trend)**에 집중하여 분석 보고서를 작성하세요.
-**주의: '{ticker}'는 '{display_name}'입니다.**
-단기적인 실적 흐름과 경영진의 가이던스 변화를 포착하는 것이 핵심입니다.
-
-**[출력 형식]**
-- 마크다운(Markdown) 형식 사용.
-
-**[필수 분석 항목]**
-1. **실적 요약 (Earnings Summary)**:
-   - 매출 및 EPS의 전년 동기(YoY) 및 전 분기(QoQ) 대비 성장률.
-   - 시장 예상치(Consensus) 상회/하회 여부 및 그 원인.
-
-2. **가이던스 변화 (Guidance Update)**: (매우 중요)
-   - 경영진이 제시한 향후 실적 전망치가 상향되었는가, 하향되었는가?
-   - 전망 변경의 구체적인 근거 (수요 증가, 비용 절감 등).
-
-3. **부문별 성과 (Segment Performance)**:
-   - 주요 사업 부문별 매출 및 이익 증감 추이.
-   - 가장 빠르게 성장하는 부문과 둔화되는 부문 식별.
-
-4. **현금흐름 및 비용 (Cash & Costs)**:
-   - 영업활동 현금흐름의 변화.
-   - R&D 및 마케팅 비용 지출 추이 (효율성 분석).
-
-[결론]
-이번 분기 실적이 일시적인지 구조적인 추세인지 판단하고, 단기/중기 투자 매력도 제시.
-"""
+            [역할] 실적 모멘텀 및 트렌드 분석가
+            [대상] {ticker} (공식 기업명: {stock_name})
+            [자료] 최신 SEC 10-Q 보고서 (Quarterly Report)
+            
+            [지시사항]
+            위 종목의 **최신 SEC 10-Q 보고서**를 기반으로 **직전 분기 대비 변화(Trend)**에 집중하여 분석 보고서를 작성하세요.
+            **주의: '{ticker}'는 '{stock_name}'입니다.**
+            단기적인 실적 흐름과 경영진의 가이던스 변화를 포착하는 것이 핵심입니다.
+            
+            **[출력 형식]**
+            - 마크다운(Markdown) 형식 사용.
+            
+            **[필수 분석 항목]**
+            1. **실적 요약 (Earnings Summary)**:
+               - 매출 및 EPS의 전년 동기(YoY) 및 전 분기(QoQ) 대비 성장률.
+               - 시장 예상치(Consensus) 상회/하회 여부 및 그 원인.
+            
+            2. **가이던스 변화 (Guidance Update)**: (매우 중요)
+               - 경영진이 제시한 향후 실적 전망치가 상향되었는가, 하향되었는가?
+               - 전망 변경의 구체적인 근거 (수요 증가, 비용 절감 등).
+            
+            3. **부문별 성과 (Segment Performance)**:
+               - 주요 사업 부문별 매출 및 이익 증감 추이.
+               - 가장 빠르게 성장하는 부문과 둔화되는 부문 식별.
+            
+            4. **현금흐름 및 비용 (Cash & Costs)**:
+               - 영업활동 현금흐름의 변화.
+               - R&D 및 마케팅 비용 지출 추이 (효율성 분석).
+            
+            [결론]
+            이번 분기 실적이 일시적인지 구조적인 추세인지 판단하고, 단기/중기 투자 매력도 제시.
+            """
         elif mode == "8K":
             prompt = f"""
-[역할] 속보 뉴스 데스크 / 이벤트 드리븐 트레이더
-
-⚠️ **중요: 모든 응답은 반드시 한글(Korean)로 작성하십시오.**
-
-{company_info_section}
-
-[자료] 최신 SEC 8-K 보고서 (Current Report)
-
-[지시사항]
-위 종목의 **최신 SEC 8-K 보고서**를 분석하여, 발생한 **특정 사건(Event)**의 내용과 주가에 미칠 영향을 즉각적으로 분석하세요.
-**주의: '{ticker}'는 '{display_name}'입니다.**
-가장 최근에 공시된 중요한 사건 하나에 집중하십시오.
-
-**[출력 형식]**
-- 마크다운(Markdown) 형식 사용.
-- 핵심 위주로 간결하고 명확하게 작성.
-
-**[필수 분석 항목]**
-1. **공시 사유 (Triggering Event)**:
-   - 8-K가 제출된 핵심 이유 (Item 번호 및 제목 확인).
-   - 예: 실적 발표, 주요 계약 체결, 경영진 사퇴, M&A, 유상증자 등.
-
-2. **세부 내용 (Details)**:
-   - 계약 금액, 거래 조건, 변경된 인물의 프로필 등 구체적 팩트 정리.
-   - 재무적으로 즉각적인 영향이 있는가?
-
-3. **호재/악재 판별 (Impact Analysis)**:
-   - 이 뉴스가 주가에 단기적으로 긍정적인지(Bullish) 부정적인지(Bearish) 명확한 판단.
-   - 시장의 예상 범위를 벗어난 서프라이즈 요소가 있는지.
-
-[결론]
-이 뉴스에 대해 투자자가 취해야 할 즉각적인 대응 전략 (매수 기회 vs 리스크 관리).
-"""
+            [역할] 속보 뉴스 데스크 / 이벤트 드리븐 트레이더
+            [대상] {ticker} (공식 기업명: {stock_name})
+            [자료] 최신 SEC 8-K 보고서 (Current Report)
+            
+            [지시사항]
+            위 종목의 **최신 SEC 8-K 보고서**를 분석하여, 발생한 **특정 사건(Event)**의 내용과 주가에 미칠 영향을 즉각적으로 분석하세요.
+            **주의: '{ticker}'는 '{stock_name}'입니다.**
+            가장 최근에 공시된 중요한 사건 하나에 집중하십시오.
+            
+            **[출력 형식]**
+            - 마크다운(Markdown) 형식 사용.
+            - 핵심 위주로 간결하고 명확하게 작성.
+            
+            **[필수 분석 항목]**
+            1. **공시 사유 (Triggering Event)**:
+               - 8-K가 제출된 핵심 이유 (Item 번호 및 제목 확인).
+               - 예: 실적 발표, 주요 계약 체결, 경영진 사퇴, M&A, 유상증자 등.
+            
+            2. **세부 내용 (Details)**:
+               - 계약 금액, 거래 조건, 변경된 인물의 프로필 등 구체적 팩트 정리.
+               - 재무적으로 즉각적인 영향이 있는가?
+            
+            3. **호재/악재 판별 (Impact Analysis)**:
+               - 이 뉴스가 주가에 단기적으로 긍정적인지(Bullish) 부정적인지(Bearish) 명확한 판단.
+               - 시장의 예상 범위를 벗어난 서프라이즈 요소가 있는지.
+            
+            [결론]
+            이 뉴스에 대해 투자자가 취해야 할 즉각적인 대응 전략 (매수 기회 vs 리스크 관리).
+            """
         else:
-            # =====================================================
-            # MAIN 모드 프롬프트
-            # =====================================================
+            # [수정] MAIN 모드 프롬프트에 요청하신 포맷 완벽 적용
             prompt = f"""
-[역할] 월스트리트 수석 애널리스트 / 투자 전략가
-
-⚠️⚠️⚠️ **[최우선 지시사항 - 반드시 준수]** ⚠️⚠️⚠️
-1. **모든 응답은 반드시 한글(Korean)로 작성하십시오. 영어 사용 금지.**
-2. **아래 모든 섹션을 빠짐없이 상세하게 작성하십시오.**
-3. **어떤 항목도 "생략", "축약", "간략화" 하지 마십시오.**
-4. **표(Table)가 있는 섹션은 반드시 표를 작성하십시오.**
-5. **각 섹션의 "💡 종합 평가/의견" 부분을 반드시 작성하십시오.**
-
----
-
-{company_info_section}
-
----
-
-## ⚙️ 분석 설정
-
-- **투자 관점**: {viewpoint}
-- **분석 레벨**: {analysis_depth}
-- **중점 분석 항목**: {focus}
-
-{level_instruction}
-
----
-
-## 📊 제공된 데이터
-
-### 주가 데이터
-{data_summary}
-
-### 재무 지표
-{fin_str}
-
-### 관련 뉴스
-{news_text}
-
----
-
-# 📋 필수 분석 항목
-
-⚠️ **아래 모든 섹션을 빠짐없이 상세하게 작성하십시오. 생략 시 분석 품질이 크게 저하됩니다.**
-⚠️ **표(Table) 형식을 사용하지 말고, 불릿 포인트(-)와 서술형으로 작성하십시오.**
-
-{detailed_instructions}
-
-{scenario_section}
-
----
-
-## 🔮 종합 결론 및 투자 의견
-
-### 최종 투자 의견
-- **투자 의견**: [매수 / 매도 / 관망] 중 명확히 선택
-- **확신도**: [매우 높음 / 높음 / 보통 / 낮음]
-- **투자 기간**: [단기 / 중기 / 장기]
-
-### 핵심 근거 (Top 3)
-1. **[근거 1 제목]**: [구체적 설명]
-2. **[근거 2 제목]**: [구체적 설명]
-3. **[근거 3 제목]**: [구체적 설명]
-
-### 목표 주가
-- **하단 목표가**: [금액] (현재가 대비 [%])
-- **기본 목표가**: [금액] (현재가 대비 [%])
-- **상단 목표가**: [금액] (현재가 대비 [%])
-
-### 주요 리스크 요인
-1. ⚠️ [리스크 1]: 영향도 [상/중/하]
-2. ⚠️ [리스크 2]: 영향도 [상/중/하]
-
----
-
-⚠️ **[최종 점검]**: 
-- 기업 기본 정보(섹터, 산업)가 상단에 포함되어 있습니까? ✓
-- 모든 분석 항목이 빠짐없이 작성되었습니까? ✓
-- 투자성향별 비중이 3가지 모두 상세히 작성되었습니까? ✓
-- 시나리오 분석이 요청된 경우, 3가지 시나리오와 확률이 모두 작성되었습니까? ✓
-
-누락된 항목이 있다면 지금 즉시 추가하십시오.
-"""
+            [역할] 월스트리트 수석 애널리스트
+            [대상] {ticker} (공식 기업명: {stock_name})
+            [모드] {mode}
+            [중점 분석] {focus}
+            [투자 관점] {viewpoint}
+            [분석 레벨] {analysis_depth}
+            
+            **주의: '{ticker}'는 '{stock_name}'입니다. 다른 기업과 혼동하지 마십시오.**
+            
+            {level_instruction}
+            
+            [데이터 요약]
+            {data_summary}
+            
+            [재무 지표]
+            {fin_str}
+            
+            [관련 뉴스]
+            {news_text}
+            
+            [지시사항]
+            위 데이터를 바탕으로 전문적이고 종합적인 투자 보고서를 작성하십시오.
+            **뉴스 분석 시, 제목뿐만 아니라 제공된 '내용요약'을 참고하여 구체적인 원인과 영향을 파악하십시오.**
+            보고서는 가독성 있게 마크다운 형식으로 작성하고, 불필요한 서론 없이 본론부터 명확히 서술하십시오.
+            
+            결론 부분에는 반드시 [매수 / 매도 / 관망] 중 하나의 명확한 투자 의견을 제시하십시오.
+            """
         
         st.session_state['temp_data'] = {
             'name': stock_name, 'tv_symbol': tv_symbol, 'is_kr': is_kr,
-            'df': df, 'prompt': prompt, 'news': [],
-            'company_info': company_info  # 기업 정보 저장
+            'df': df, 'prompt': prompt, 'news': []
         }
         add_log(f"✅ [STEP 1] 데이터 준비 완료 (Prompt Length: {len(prompt)})")
         return True
@@ -1371,6 +601,7 @@ def step_fetch_data(ticker, mode):
 # ---------------------------------------------------------
 st.sidebar.subheader("🎯 분석 옵션")
 
+# [컴팩트] 슬라이더 간격 축소
 viewpoint_mapping = {"단기 (1주~1개월)": "3mo", "스윙 (1~3개월)": "6mo", "중기 (6개월~1년)": "2y", "장기 (1~3년)": "5y"}
 selected_viewpoint = st.sidebar.select_slider("", options=list(viewpoint_mapping.keys()), value="중기 (6개월~1년)", label_visibility="collapsed")
 st.session_state['selected_period_str'] = viewpoint_mapping[selected_viewpoint]
@@ -1380,6 +611,7 @@ analysis_levels = ["1.요약", "2.표준", "3.심층", "4.전문가", "5.시나�
 analysis_depth = st.sidebar.select_slider("", options=analysis_levels, value=analysis_levels[-1], label_visibility="collapsed")
 st.session_state['analysis_depth'] = analysis_depth
 
+# 뉴스 토글 & 중점 항목 (밀착 배치)
 st.session_state['use_news'] = st.sidebar.toggle("뉴스 데이터 반영", value=True)
 
 def toggle_focus_all():
@@ -1390,20 +622,24 @@ with st.sidebar.expander("☑️ 중점 분석 항목", expanded=False):
     st.checkbox("전체 선택", key="focus_all", on_change=toggle_focus_all)
     for opt in opt_targets: st.checkbox(opt, key=f"focus_{opt}")
 
+# Secrets Key Check
 api_key = None
 if "GEMINI_API_KEY" in st.secrets:
     api_key = st.secrets["GEMINI_API_KEY"]
 else:
     st.sidebar.error("⚠️ Secrets에 'GEMINI_API_KEY'가 설정되지 않았습니다.")
 
+# 탭 구성
 tab_search, tab_fav = st.sidebar.tabs(["⚡ 검색", "⭐ 포트폴리오"])
 prompt_mode_search = False
 prompt_mode_port = False
 
+# [단일 검색]
 with tab_search:
     st.markdown("<br>", unsafe_allow_html=True) 
     single_input = st.text_input("티커 (예: 005930.KS)", key="s_input")
     c_chk, c_btn = st.columns([0.5, 0.5])
+    # [수정] 프롬프트 모드 기본값 True로 설정
     with c_chk: prompt_mode_search = st.checkbox("☑️ 프롬프트만", key="chk_prompt_single", value=True)
     with c_btn: 
         if api_key or prompt_mode_search:
@@ -1418,6 +654,7 @@ with tab_search:
     with c2: st.button("10-Q", key="btn_s_10q", on_click=handle_search_click, args=("10Q", prompt_mode_search))
     with c3: st.button("8-K", key="btn_s_8k", on_click=handle_search_click, args=("8K", prompt_mode_search))
 
+# [포트폴리오]
 selected_tickers = []
 if 'selected' in st.query_params:
     selected_str = st.query_params['selected']
@@ -1430,11 +667,14 @@ with tab_fav:
     st.markdown("<br>", unsafe_allow_html=True)
     c1, c2 = st.columns([0.75, 0.25])
     with c1: st.text_input("종목 추가 (콤마 구분)", placeholder="AAPL, TSLA", label_visibility="collapsed", key="new_ticker_input")
+    # [수정] 콜백 로직을 add_ticker_logic으로 변경
     with c2: st.button("➕", on_click=add_ticker_logic)
 
+    # [핵심] CSV 파일이 아닌 Session State에서 데이터 가져옴
     fav_df = st.session_state.get('portfolio_df', pd.DataFrame(columns=['ticker', 'name']))
     
     if not fav_df.empty:
+        # 이미 선택된 상태 동기화
         for t in fav_df['ticker']:
             if st.session_state.get(f"chk_{t}", False):
                 if t not in selected_tickers: selected_tickers.append(t)
@@ -1466,7 +706,9 @@ with tab_fav:
         st.markdown("""<div style="display: flex; align-items: center; gap: 8px; padding: 8px 0;"><span style="font-size: 14px; font-weight: 600; color: #1e293b;">📂 포트폴리오</span><span style="font-size: 11px; color: #9ca3af; font-style: italic;">비어있음</span></div>""", unsafe_allow_html=True)
     st.markdown('<div style="height: 10px"></div>', unsafe_allow_html=True)
     
+    # 분석 버튼들
     c_chk_p, c_btn_p = st.columns([0.5, 0.5])
+    # [수정] 프롬프트 모드 기본값 True로 설정
     with c_chk_p: prompt_mode_port = st.checkbox("☑️ 프롬프트만", key="chk_prompt_port", value=True)
     with c_btn_p: 
         if st.button("🚀 종합 분석 시작", type="primary", key="btn_run_main"):
@@ -1491,6 +733,7 @@ with tab_fav:
                 selected_tickers = [t.strip() for t in st.query_params['selected'].split(',') if t.strip()]
             start_analysis_process(selected_tickers, "10Q", prompt_mode_port)
 
+# [이동 완료] AI 모델 선택 (사이드바 최하단)
 st.sidebar.markdown('<hr>', unsafe_allow_html=True)
 st.sidebar.subheader("🤖 AI 모델 선택")
 model_options = [
@@ -1504,6 +747,7 @@ model_options = [
 selected_model = st.sidebar.selectbox("기본 분석 모델", model_options, index=0, label_visibility="collapsed")
 st.session_state['selected_model'] = selected_model
 
+# [로그 시스템] 사이드바 최하단에 Expander 추가
 st.sidebar.markdown('<hr>', unsafe_allow_html=True)
 with st.sidebar.expander("📜 시스템 실행 로그 (System Logs)", expanded=False):
     log_text = "\n".join(st.session_state['log_buffer'])
@@ -1515,7 +759,7 @@ with st.sidebar.expander("📜 시스템 실행 로그 (System Logs)", expanded=
 # ---------------------------------------------------------
 # 6. 실행 컨트롤러 (오토 드라이브)
 # ---------------------------------------------------------
-st.title(f"📈 AI Hyper-Analyst V86")
+st.title(f"📈 AI Hyper-Analyst V84")
 
 if st.session_state['is_analyzing']:
     targets = st.session_state['targets_to_run']
@@ -1539,6 +783,7 @@ if st.session_state['is_analyzing']:
     current_progress = (current_idx * 2 + (1 if current_stage > 1 else 0)) / total_steps
     st.progress(current_progress, text=f"🚀 [{current_idx+1}/{len(targets)}] {curr_ticker} 분석 진행 중...")
 
+    # [Step 1] 데이터 수집
     if current_stage == 1:
         if current_idx == 0:
             collapse_sidebar()
@@ -1559,6 +804,7 @@ if st.session_state['is_analyzing']:
             
             st.rerun() 
 
+    # [Step 2] AI 분석
     elif current_stage == 2:
         temp = st.session_state['temp_data']
         
@@ -1567,8 +813,7 @@ if st.session_state['is_analyzing']:
                 'name': temp['name'], 'tv_symbol': temp['tv_symbol'], 'is_kr': temp['is_kr'],
                 'df': temp['df'], 'report': "프롬프트 생성 완료", 'news': [], 
                 'model': "Manual", 'mode': st.session_state['current_mode'],
-                'prompt': temp['prompt'], 'status': 'manual',
-                'company_info': temp.get('company_info', {})
+                'prompt': temp['prompt'], 'status': 'manual'
             }
         else:
             with st.spinner(f"🧠 {curr_ticker}: AI 분석 보고서 작성 중 (자동 재시도 포함)..."):
@@ -1585,8 +830,7 @@ if st.session_state['is_analyzing']:
                     'name': temp['name'], 'tv_symbol': temp['tv_symbol'], 'is_kr': temp['is_kr'],
                     'df': temp['df'], 'report': sanitize_text(report), 'news': [], 
                     'model': used_model, 'mode': st.session_state['current_mode'],
-                    'prompt': temp['prompt'], 'status': status,
-                    'company_info': temp.get('company_info', {})
+                    'prompt': temp['prompt'], 'status': status
                 }
 
         st.session_state['proc_index'] = current_idx + 1
@@ -1609,22 +853,8 @@ if not st.session_state['is_analyzing'] and st.session_state['analysis_results']
         else: 
             status_color = "green"
 
-        # 기업 정보 표시
-        company_info = data.get('company_info', {})
-        sector_info = f" | 🏭 {company_info.get('sector', 'N/A')} > {company_info.get('industry', 'N/A')}" if company_info else ""
-
-        with st.expander(f"{header_prefix} {data.get('name', ticker)} ({ticker}){sector_info}", expanded=True):
+        with st.expander(f"{header_prefix} {data.get('name', ticker)} ({ticker}) 결과", expanded=True):
             st.caption(f"Mode: **{data.get('mode')}** | 🤖 Model: **{data.get('model')}** | Status: :{status_color}[{data.get('status', 'success')}]")
-            
-            # 기업 기본 정보 카드
-            if company_info and company_info.get('sector') != '정보 없음':
-                st.markdown(f"""
-                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 12px 16px; border-radius: 8px; margin-bottom: 15px;">
-                    <div style="color: white; font-size: 11px; opacity: 0.9;">📍 섹터/산업</div>
-                    <div style="color: white; font-size: 14px; font-weight: 600;">{company_info.get('sector', 'N/A')} → {company_info.get('industry', 'N/A')}</div>
-                    <div style="color: white; font-size: 11px; margin-top: 4px; opacity: 0.8;">시가총액: {company_info.get('market_cap', 'N/A')} | 직원: {company_info.get('employees', 'N/A')}</div>
-                </div>
-                """, unsafe_allow_html=True)
             
             if not data['df'].empty:
                 if data.get('is_kr', False):
