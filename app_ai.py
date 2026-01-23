@@ -51,7 +51,6 @@ def add_log(message):
         st.session_state['log_buffer'].pop(0)
 
 # [변수 정의] 최상단 배치
-# [수정] WACC 항목 추가
 opt_targets = [
     "현금건전성 지표 (FCF, 유동비율, 부채비율)", 
     "핵심 재무제표 분석 (손익, 대차대조, 현금흐름)",
@@ -60,7 +59,7 @@ opt_targets = [
     "기술적 지표 (RSI/이평선)",
     "외국인/기관 수급 분석", 
     "경쟁사 비교 및 업황",
-    "WACC (가중평균자본비용) 분석", # <-- 신규 추가
+    "WACC (가중평균자본비용) 분석", 
     "투자성향별 포트폴리오 적정보유비중", 
     "단기/중기 매매 전략"
 ]
@@ -426,13 +425,23 @@ def step_fetch_data(ticker, mode):
         if employees != 'N/A': employees = f"{employees:,}명"
         
         mkt_cap_raw = info.get('marketCap', 'N/A')
+        cap_category = "N/A"
+        
         if isinstance(mkt_cap_raw, (int, float)):
              # 조 단위(Billion) 등 적절한 포맷팅 (달러 기준)
              mkt_cap = f"${mkt_cap_raw / 1_000_000_000:,.2f}B"
+             
+             # [NEW] 시가총액 분류 로직 (Large: >10B, Mid: 2B~10B, Small: <2B)
+             if mkt_cap_raw >= 10_000_000_000:
+                 cap_category = "Large Cap"
+             elif mkt_cap_raw >= 2_000_000_000:
+                 cap_category = "Mid Cap"
+             else:
+                 cap_category = "Small Cap"
         else:
              mkt_cap = "N/A"
 
-        add_log(f"   - 기본 정보 확보: {stock_name} / {sector} / {industry}")
+        add_log(f"   - 기본 정보 확보: {stock_name} / {sector} / {industry} / {cap_category}")
 
         period = st.session_state.get('selected_period_str', '1y')
         add_log(f"   - 주가 데이터 요청 (기간: {period})")
@@ -606,7 +615,7 @@ def step_fetch_data(ticker, mode):
             **모든 답변은 반드시 한글로 작성해 주십시오.**
             """
         else:
-            # [수정] WACC 관련 상세 지침 추가
+            # [수정] WACC 관련 상세 지침 추가 및 Company Overview 표에 기업 규모 추가
             prompt = f"""
             [역할] 월스트리트 수석 애널리스트
             [대상] {ticker} (공식 기업명: {stock_name})
@@ -639,6 +648,7 @@ def step_fetch_data(ticker, mode):
                  | 산업 (Industry) | {industry} |
                  | 국가 | {country} |
                  | 시가총액 | {mkt_cap} |
+                 | 기업 규모 | {cap_category} |
                  | 직원 수 | {employees} |
 
             1. **[성장주/가치주 정의 및 핵심 지표 분석]**
