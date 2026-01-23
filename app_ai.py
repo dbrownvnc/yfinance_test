@@ -51,6 +51,7 @@ def add_log(message):
         st.session_state['log_buffer'].pop(0)
 
 # [변수 정의] 최상단 배치
+# [수정] WACC 항목 추가
 opt_targets = [
     "현금건전성 지표 (FCF, 유동비율, 부채비율)", 
     "핵심 재무제표 분석 (손익, 대차대조, 현금흐름)",
@@ -58,7 +59,8 @@ opt_targets = [
     "호재/악재 뉴스 판단", 
     "기술적 지표 (RSI/이평선)",
     "외국인/기관 수급 분석", 
-    "경쟁사 비교 및 업황", 
+    "경쟁사 비교 및 업황",
+    "WACC (가중평균자본비용) 분석", # <-- 신규 추가
     "투자성향별 포트폴리오 적정보유비중", 
     "단기/중기 매매 전략"
 ]
@@ -485,7 +487,6 @@ def step_fetch_data(ticker, mode):
         viewpoint = st.session_state.get('selected_viewpoint', 'General')
         analysis_depth = st.session_state.get('analysis_depth', "2. 표준 브리핑 (Standard)")
         
-        # [수정] 시나리오 모드일 경우 추가 지침 설정
         level_instruction = ""
         scenario_block = ""
         if "5." in analysis_depth:
@@ -605,7 +606,7 @@ def step_fetch_data(ticker, mode):
             **모든 답변은 반드시 한글로 작성해 주십시오.**
             """
         else:
-            # [수정] 지시사항 명확화: Overview + 성장주/가치주 + 선택 항목 + 포트폴리오 + (시나리오)
+            # [수정] WACC 관련 상세 지침 추가
             prompt = f"""
             [역할] 월스트리트 수석 애널리스트
             [대상] {ticker} (공식 기업명: {stock_name})
@@ -647,6 +648,7 @@ def step_fetch_data(ticker, mode):
 
             2. **[사용자 선택 중점 분석 항목 상세]**
                - 위 [중점 분석] 리스트({focus})에 포함된 항목들을 빠짐없이 상세하게 분석하십시오.
+               - **만약 'WACC'가 포함되어 있다면**: 가능한 경우 **ROIC(투하자본이익률)와 WACC를 비교**하여 기업이 자본비용 대비 초과 수익(Value Creation)을 내고 있는지, 아니면 가치를 파괴하고 있는지(Value Destruction) 평가하십시오.
                - 예: **투자기관 컨센서스/목표주가**, **뉴스 호재/악재**, **기술적 지표(RSI, 이평선)**, **수급(외국인/기관)**, **경쟁사 비교**, **매매 전략** 등이 포함되어 있다면 반드시 해당 내용을 구체적으로 서술해야 합니다.
 
             3. **[투자성향별 포트폴리오 비중 분석]** (만약 '투자성향별 포트폴리오 적정보유비중'이 선택되었다면):
