@@ -18,6 +18,7 @@ from urllib3.util.retry import Retry
 import math
 import html
 from difflib import SequenceMatcher
+import json
 
 # ---------------------------------------------------------
 # 1. 설정 및 초기화
@@ -614,6 +615,33 @@ def step_fetch_data(ticker, mode):
             이 뉴스에 대해 투자자가 취해야 할 즉각적인 대응 전략 (매수 기회 vs 리스크 관리).
             **모든 답변은 반드시 한글로 작성해 주십시오.**
             """
+        elif mode == "WHY":
+            prompt = f"""
+            [역할] 주식 시황 및 급등락 원인 분석가
+            [대상] {ticker} (공식 기업명: {stock_name})
+            [자료] 실시간 뉴스 및 주가 데이터
+            
+            [지시사항]
+            사용자는 **"이 주식이 오늘 왜 오르거나 내리는지"** 그 핵심 이유를 알고 싶어 합니다.
+            수집된 **뉴스 헤드라인**과 **최신 주가 흐름**을 종합하여 변동의 원인을 명쾌하게 설명해 주세요.
+            
+            [데이터 요약]
+            {data_summary}
+            
+            [수집된 최신 뉴스]
+            {news_text}
+            
+            [분석 요구사항]
+            1. **등락 현황**: 현재 주가가 얼마나 오르거나 내렸는지 팩트를 한 줄로 명시하십시오.
+            2. **핵심 원인 (3줄 요약)**: 
+               - 뉴스를 근거로 상승/하락의 가장 결정적인 이유를 3가지 포인트로 요약하십시오.
+               - 특별한 뉴스가 없다면 기술적 반등, 차익 실현, 또는 단순 시장 동조화(지수 추종) 가능성을 언급하십시오.
+            3. **투자자 팁**: 이 변동이 일시적인 이벤트인지 추세적인 변화인지 짧게 코멘트하십시오.
+            
+            **[출력 형식]**
+            - 서론 없이 바로 분석 내용을 마크다운으로 작성하십시오.
+            - **반드시 한글로 작성하십시오.**
+            """
         else:
             # [수정] WACC 관련 상세 지침 추가 및 Company Overview 표에 기업 규모 추가
             prompt = f"""
@@ -732,15 +760,29 @@ prompt_mode_port = False
 with tab_search:
     st.markdown("<br>", unsafe_allow_html=True) 
     single_input = st.text_input("티커 (예: 005930.KS)", key="s_input")
-    c_chk, c_btn = st.columns([0.5, 0.5])
-    # [수정] 프롬프트 모드 기본값 True로 설정
-    with c_chk: prompt_mode_search = st.checkbox("☑️ 프롬프트만", key="chk_prompt_single", value=True)
+    
+    # [수정] 3열 레이아웃: 체크박스 | 분석버튼 | Why버튼
+    c_chk, c_btn, c_why = st.columns([0.35, 0.35, 0.3]) 
+    
+    with c_chk: 
+        prompt_mode_search = st.checkbox("프롬프트만", key="chk_prompt_single", value=True)
+    
     with c_btn: 
         if api_key or prompt_mode_search:
-            st.button("🔍 분석 시작", type="primary", key="btn_s_main", 
-                    on_click=handle_search_click, args=("MAIN", prompt_mode_search))
+            st.button("🔍 분석", type="primary", key="btn_s_main", 
+                    on_click=handle_search_click, args=("MAIN", prompt_mode_search),
+                    help="종합 정밀 분석을 수행합니다.")
         else:
-            st.button("🔍 분석 시작", disabled=True, key="btn_s_main_disabled", help="API Key가 필요합니다.")
+            st.button("🔍 분석", disabled=True, key="btn_s_main_disabled")
+            
+    with c_why:
+        # [NEW] Why? 버튼 추가
+        if api_key or prompt_mode_search:
+            st.button("Why?", key="btn_s_why", 
+                    on_click=handle_search_click, args=("WHY", prompt_mode_search),
+                    help="주가가 왜 오르거나 내리는지 뉴스 기반으로 요약합니다.")
+        else:
+            st.button("Why?", disabled=True, key="btn_s_why_disabled")
     
     st.markdown("##### 📑 공시 분석")
     c1, c2, c3 = st.columns(3)
