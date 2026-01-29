@@ -427,40 +427,74 @@ def step_fetch_data(ticker, mode):
         
         mkt_cap_raw = info.get('marketCap', 'N/A')
         cap_category = "N/A"
-        
         if isinstance(mkt_cap_raw, (int, float)):
-             # 조 단위(Billion) 등 적절한 포맷팅 (달러 기준)
              mkt_cap = f"${mkt_cap_raw / 1_000_000_000:,.2f}B"
-             
-             # [NEW] 시가총액 분류 로직 (Large: >10B, Mid: 2B~10B, Small: <2B)
-             if mkt_cap_raw >= 10_000_000_000:
-                 cap_category = "Large Cap"
-             elif mkt_cap_raw >= 2_000_000_000:
-                 cap_category = "Mid Cap"
-             else:
-                 cap_category = "Small Cap"
-        else:
-             mkt_cap = "N/A"
+             if mkt_cap_raw >= 10_000_000_000: cap_category = "Large Cap"
+             elif mkt_cap_raw >= 2_000_000_000: cap_category = "Mid Cap"
+             else: cap_category = "Small Cap"
+        else: mkt_cap = "N/A"
 
         add_log(f"   - 기본 정보 확보: {stock_name} / {sector} / {industry} / {cap_category}")
 
+        # ------------------------------------------------------------------
+        # [수정] 주가 데이터 로직 강화 (24시간 반영)
+        # ------------------------------------------------------------------
         period = st.session_state.get('selected_period_str', '1y')
-        add_log(f"   - 주가 데이터 요청 (기간: {period})")
+        
+        # 1. 차트용 기본 데이터 (긴 기간)
         df = run_with_timeout(_fetch_history, args=(ticker, period), timeout=10)
         
-        if df is None: 
-            df = pd.DataFrame()
-            add_log("   ⚠️ 주가 데이터 타임아웃/실패")
-        else:
-            add_log(f"   ✅ 주가 데이터 수신: {len(df)} rows")
+        if df is None: df = pd.DataFrame(); add_log("   ⚠️ 차트 데이터 타임아웃/실패")
+        else: add_log(f"   ✅ 차트 데이터 수신: {len(df)} rows")
 
-        data_summary = "No Data"
+        # 2. [핵심] "Why" 모드용 실시간/시간외(Pre/Post) 데이터 정밀 조회
+        realtime_note = ""
+        current_price = 0
+        
+        if mode == "WHY" and not is_kr:
+            # 미국 주식의 경우 1분 단위 Pre/Post 데이터 조회
+            add_log("   🕒 [Real-time] 미국 주식 Pre/Post Market 데이터 조회 시도...")
+            try:
+                # 최근 5일치 중 1분봉, prepost=True로 장외거래 포함
+                df_realtime = stock.history(period="5d", interval="1m", prepost=True)
+                if not df_realtime.empty:
+                    last_row = df_realtime.iloc[-1]
+                    current_price = last_row['Close']
+                    last_time = df_realtime.index[-1]
+                    
+                    # 정규장 종가(previousClose)와 비교
+                    prev_close = info.get('previousClose', current_price)
+                    delta = current_price - prev_close
+                    delta_pct = (delta / prev_close) * 100
+                    
+                    realtime_note = f"""
+                    [실시간/시간외 시세 정보]
+                    - 기준 시간: {last_time} (현지시간 추정)
+                    - 현재가(Pre/Post 포함): {current_price:.2f}
+                    - 전일 종가 대비: {delta_pct:.2f}% ({delta:+.2f})
+                    - 참고: 이 데이터는 정규장 마감 후(After-hours) 또는 개장 전(Pre-market) 거래가 포함된 최신 가격입니다.
+                    """
+                    add_log(f"   ✅ [Real-time] 시간외 가격 확보: {current_price} ({delta_pct:.2f}%)")
+                else:
+                    realtime_note = "(실시간 데이터 조회 실패, 정규장 데이터만 사용됨)"
+            except Exception as e:
+                add_log(f"   ⚠️ [Real-time] Error: {e}")
+        elif not df.empty:
+            # 한국 주식 혹은 일반 모드
+            current_price = df['Close'].iloc[-1]
+            realtime_note = f"현재가(종가): {current_price:,.0f}" if is_kr else f"Current: {current_price:.2f}"
+
+        # ------------------------------------------------------------------
+        # 데이터 요약 텍스트 생성
+        # ------------------------------------------------------------------
         if not df.empty:
-            curr = df['Close'].iloc[-1]; high_val = df['High'].max(); low_val = df['Low'].min()
-            stats_str = f"High: {high_val:.2f}, Low: {low_val:.2f}, Current: {curr:.2f}"
+            high_val = df['High'].max(); low_val = df['Low'].min()
+            stats_str = f"Range(Period): {low_val:.2f} ~ {high_val:.2f}"
             display_df = df.tail(60); recent_days = df.tail(5)
-            data_summary = f"[Stats] {stats_str}\n[Trend]\n{display_df.to_string()}\n[Recent]\n{recent_days.to_string()}"
-        else: curr = 0
+            # realtime_note를 요약 맨 위에 붙여줌
+            data_summary = f"{realtime_note}\n\n[Period Trend]\n{display_df.to_string()}\n[Recent 5 Days]\n{recent_days.to_string()}"
+        else:
+            data_summary = f"Chart Data Not Available.\n{realtime_note}"
 
         fin_str = "N/A"; news_text = "N/A"
         
@@ -471,7 +505,8 @@ def step_fetch_data(ticker, mode):
             
             if st.session_state.get('use_news', True):
                 try:
-                    # 여기서 stock_name(공식 기업명)이 전달됨
+                    # Why 모드일 때는 검색 쿼리를 좀 더 구체적으로 변경 가능
+                    # 여기서는 기존 로직을 타되, 프롬프트에서 강력하게 해석하도록 유도
                     news = get_realtime_news(ticker, stock_name)
                     if news: 
                         formatted_news = []
@@ -617,26 +652,31 @@ def step_fetch_data(ticker, mode):
             """
         elif mode == "WHY":
             prompt = f"""
-            [역할] 주식 시황 및 급등락 원인 분석가
+            [역할] 주식 시황 및 급등락 원인 분석가 (24시간 시장 모니터링)
             [대상] {ticker} (공식 기업명: {stock_name})
-            [자료] 실시간 뉴스 및 주가 데이터
+            [자료] 실시간 뉴스(Earnings 포함) 및 24시간 주가 데이터(Pre/Post Market)
             
             [지시사항]
-            사용자는 **"이 주식이 오늘 왜 오르거나 내리는지"** 그 핵심 이유를 알고 싶어 합니다.
-            수집된 **뉴스 헤드라인**과 **최신 주가 흐름**을 종합하여 변동의 원인을 명쾌하게 설명해 주세요.
+            사용자는 **"이 주식이 지금(장중 혹은 시간외) 왜 움직이는지"** 알고 싶어 합니다.
+            특히 정규장 종료 후 실적 발표(Earnings)나 중요 공시로 인한 **시간외 급등락** 여부를 면밀히 살피십시오.
             
-            [데이터 요약]
+            [데이터 요약 - 시간외 시세 포함]
             {data_summary}
             
             [수집된 최신 뉴스]
             {news_text}
             
             [분석 요구사항]
-            1. **등락 현황**: 현재 주가가 얼마나 오르거나 내렸는지 팩트를 한 줄로 명시하십시오.
+            1. **현재 상황 팩트 체크**: 
+               - 현재 주가 움직임이 '정규장' 흐름인지 '시간외(After-hours/Pre-market)' 흐름인지 구분하여 명시하십시오.
+               - 예: "정규장은 1% 상승 마감했으나, 실적 발표 후 시간외 거래에서 10% 급락 중입니다."
+               
             2. **핵심 원인 (3줄 요약)**: 
-               - 뉴스를 근거로 상승/하락의 가장 결정적인 이유를 3가지 포인트로 요약하십시오.
-               - 특별한 뉴스가 없다면 기술적 반등, 차익 실현, 또는 단순 시장 동조화(지수 추종) 가능성을 언급하십시오.
-            3. **투자자 팁**: 이 변동이 일시적인 이벤트인지 추세적인 변화인지 짧게 코멘트하십시오.
+               - 뉴스(특히 실적, 가이던스, 공시)를 근거로 변동의 핵심 원인을 3가지로 요약하십시오.
+               - 실적 발표 직후라면 **매출/EPS가 예상치(Consensus)를 상회했는지 하회했는지** 뉴스에서 찾아 언급하십시오.
+               
+            3. **투자자 팁**: 
+               - 이 뉴스나 변동이 내일 정규장 시초가에 어떤 영향을 미칠지 짧게 전망하십시오.
             
             **[출력 형식]**
             - 서론 없이 바로 분석 내용을 마크다운으로 작성하십시오.
